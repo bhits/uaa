@@ -36,7 +36,7 @@ import static org.junit.Assert.assertTrue;
 public class LocalUaaRestTemplateMockMvcTests extends InjectedMockContextTest {
 
     @Test
-    public void testLocalUaaRestTemplateAcquireToken() {
+    public void testLocalUaaRestTemplateAcquireToken() throws Exception {
         LocalUaaRestTemplate restTemplate = getWebApplicationContext().getBean(LocalUaaRestTemplate.class);
         OAuth2AccessToken token = restTemplate.acquireAccessToken(new DefaultOAuth2ClientContext());
         assertTrue("Scopes should contain oauth.login", token.getScope().contains("oauth.login"));
@@ -59,8 +59,8 @@ public class LocalUaaRestTemplateMockMvcTests extends InjectedMockContextTest {
     @Test
     @Ignore("Only run Self Signed Test when we have an actual environment to test against.")
     public void testSelfSignedCertificate() throws Exception {
-        String url = "https://notifications.identity.cf-app.com/info";
-        //String url = "https://notifications.identity.cf-app.com/notifications";
+        String url = "https://notifications.uaa-acceptance.cf-app.com/info";
+        //String url = "https://notifications.uaa-acceptance.cf-app.com/notifications";
         LocalUaaRestTemplate restTemplate = getWebApplicationContext().getBean(LocalUaaRestTemplate.class);
         ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
         assertEquals(HttpStatus.OK, response.getStatusCode());

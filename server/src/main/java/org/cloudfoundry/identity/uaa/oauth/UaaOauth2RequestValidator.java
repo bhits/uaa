@@ -12,12 +12,9 @@
  *******************************************************************************/
 package org.cloudfoundry.identity.uaa.oauth;
 
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.regex.Pattern;
-
 import org.cloudfoundry.identity.uaa.util.UaaStringUtils;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.common.exceptions.InvalidScopeException;
 import org.springframework.security.oauth2.common.util.OAuth2Utils;
@@ -26,9 +23,22 @@ import org.springframework.security.oauth2.provider.ClientDetails;
 import org.springframework.security.oauth2.provider.OAuth2RequestValidator;
 import org.springframework.security.oauth2.provider.TokenRequest;
 
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.GRANT_TYPE_USER_TOKEN;
+import static org.springframework.security.oauth2.common.util.OAuth2Utils.CLIENT_ID;
+
 public class UaaOauth2RequestValidator implements OAuth2RequestValidator {
 
     private static String CLIENT_CREDENTIALS = "client_credentials";
+    private ClientServicesExtension clientDetailsService;
+
+    public void setClientDetailsService(ClientServicesExtension clientDetailsService) {
+        this.clientDetailsService = clientDetailsService;
+    }
 
     public void validateScope(AuthorizationRequest authorizationRequest, ClientDetails client) throws InvalidScopeException {
         if (CLIENT_CREDENTIALS.equalsIgnoreCase(authorizationRequest.getRequestParameters().get(OAuth2Utils.GRANT_TYPE))) {
@@ -36,12 +46,14 @@ public class UaaOauth2RequestValidator implements OAuth2RequestValidator {
         } else {
             validateScope(authorizationRequest.getScope(), client.getScope(), true);
         }
-
     }
 
     public void validateScope(TokenRequest tokenRequest, ClientDetails client) throws InvalidScopeException {
         if (CLIENT_CREDENTIALS.equalsIgnoreCase(tokenRequest.getGrantType())) {
             validateScope(tokenRequest.getScope(), getAuthorities(client.getAuthorities()), false);
+        } else if (GRANT_TYPE_USER_TOKEN.equalsIgnoreCase(tokenRequest.getGrantType())) {
+            client = clientDetailsService.loadClientByClientId(tokenRequest.getRequestParameters().get(CLIENT_ID), IdentityZoneHolder.get().getId());
+            validateScope(tokenRequest.getScope(), client.getScope(), true);
         } else {
             validateScope(tokenRequest.getScope(), client.getScope(), true);
         }

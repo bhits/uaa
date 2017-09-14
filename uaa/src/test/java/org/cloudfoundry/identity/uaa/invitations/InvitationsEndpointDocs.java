@@ -14,6 +14,7 @@ package org.cloudfoundry.identity.uaa.invitations;
 
 import org.cloudfoundry.identity.uaa.mock.InjectedMockContextTest;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneSwitchingFilter;
 import org.junit.Before;
 import org.junit.Test;
 import org.springframework.restdocs.snippet.Snippet;
@@ -30,6 +31,7 @@ import static org.springframework.restdocs.mockmvc.RestDocumentationRequestBuild
 import static org.springframework.restdocs.operation.preprocess.Preprocessors.preprocessRequest;
 import static org.springframework.restdocs.operation.preprocess.Preprocessors.preprocessResponse;
 import static org.springframework.restdocs.operation.preprocess.Preprocessors.prettyPrint;
+import static org.springframework.restdocs.payload.JsonFieldType.ARRAY;
 import static org.springframework.restdocs.payload.JsonFieldType.BOOLEAN;
 import static org.springframework.restdocs.payload.JsonFieldType.STRING;
 import static org.springframework.restdocs.payload.PayloadDocumentation.fieldWithPath;
@@ -84,10 +86,10 @@ public class InvitationsEndpointDocs extends InjectedMockContextTest {
                 fieldWithPath("new_invites[].userId").type(STRING).description("A unique string for the invited user"),
                 fieldWithPath("new_invites[].origin").type(STRING).description("Unique alias of the provider"),
                 fieldWithPath("new_invites[].success").type(BOOLEAN).description("Flag to determine whether the invitation was sent successfully"),
-                fieldWithPath("new_invites[].errorCode").type(STRING).description("Error code in case of failure to send invitation"),
-                fieldWithPath("new_invites[].errorMessage").type(STRING).description("Error message in case of failure to send invitation"),
+                fieldWithPath("new_invites[].errorCode").optional().type(STRING).description("Error code in case of failure to send invitation"),
+                fieldWithPath("new_invites[].errorMessage").optional().type(STRING).description("Error message in case of failure to send invitation"),
                 fieldWithPath("new_invites[].inviteLink").type(STRING).description("Invitation link to invite users"),
-                fieldWithPath("failed_invites").type(STRING).description("List of invites having exception in sending the invitation")
+                fieldWithPath("failed_invites").type(ARRAY).description("List of invites having exception in sending the invitation")
         );
 
         getMockMvc().perform(post("/invite_users?" + String.format("%s=%s&%s=%s", CLIENT_ID, clientId, REDIRECT_URI, redirectUri))
@@ -99,7 +101,9 @@ public class InvitationsEndpointDocs extends InjectedMockContextTest {
                         preprocessRequest(prettyPrint()),
                         preprocessResponse(prettyPrint()),
                         requestHeaders(
-                                headerWithName("Authorization").description("Bearer token containing `scim.invite`")
+                                headerWithName("Authorization").description("Bearer token containing `scim.invite`"),
+                                headerWithName(IdentityZoneSwitchingFilter.HEADER).optional().description("If using a `zones.<zoneId>.admin scope/token, indicates what zone this request goes to by supplying a zone_id."),
+                                headerWithName(IdentityZoneSwitchingFilter.SUBDOMAIN_HEADER).optional().description("If using a `zones.<zoneId>.admin scope/token, indicates what zone this request goes to by supplying a subdomain.")
                         ),
                         requestParameters,
                         requestFields,

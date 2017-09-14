@@ -15,29 +15,19 @@ package org.cloudfoundry.identity.uaa.account;
 import com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.cloudfoundry.identity.uaa.authentication.UaaPrincipal;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCode;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCodeStore;
-import org.cloudfoundry.identity.uaa.constants.OriginKeys;
-import org.cloudfoundry.identity.uaa.error.UaaException;
 import org.cloudfoundry.identity.uaa.message.MessageService;
 import org.cloudfoundry.identity.uaa.message.MessageType;
-import org.cloudfoundry.identity.uaa.scim.ScimUser;
 import org.cloudfoundry.identity.uaa.scim.endpoints.PasswordChange;
-import org.cloudfoundry.identity.uaa.scim.exception.InvalidPasswordException;
-import org.cloudfoundry.identity.uaa.user.UaaAuthority;
 import org.cloudfoundry.identity.uaa.user.UaaUser;
 import org.cloudfoundry.identity.uaa.user.UaaUserDatabase;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.cloudfoundry.identity.uaa.util.UaaUrlUtils;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
-import org.springframework.security.web.savedrequest.SavedRequest;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.util.StringUtils;
@@ -48,11 +38,11 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.thymeleaf.TemplateEngine;
 import org.thymeleaf.context.Context;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import java.sql.Timestamp;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 import static org.springframework.util.StringUtils.hasText;
 
@@ -63,25 +53,19 @@ public class ResetPasswordController {
     private final ResetPasswordService resetPasswordService;
     private final MessageService messageService;
     private final TemplateEngine templateEngine;
-    private final String companyName;
-    private final Pattern emailPattern;
     private final ExpiringCodeStore codeStore;
     private final UaaUserDatabase userDatabase;
 
-    @Value("${c2s.uaa.host}")
-    private String c2sUaaHost;
-
-    public ResetPasswordController(ResetPasswordService resetPasswordService,
-                                   MessageService messageService,
-                                   TemplateEngine templateEngine,
-                                   String companyName,
-                                   ExpiringCodeStore codeStore,
-                                   UaaUserDatabase userDatabase) {
+    public ResetPasswordController(
+        ResetPasswordService resetPasswordService,
+        MessageService messageService,
+        TemplateEngine templateEngine,
+        ExpiringCodeStore codeStore,
+        UaaUserDatabase userDatabase
+    ) {
         this.resetPasswordService = resetPasswordService;
         this.messageService = messageService;
         this.templateEngine = templateEngine;
-        this.companyName = companyName;
-        emailPattern = Pattern.compile("^\\S+@\\S+\\.\\S+$");
         this.codeStore = codeStore;
         this.userDatabase = userDatabase;
     }
@@ -89,38 +73,43 @@ public class ResetPasswordController {
     @RequestMapping(value = "/forgot_password", method = RequestMethod.GET)
     public String forgotPasswordPage(Model model,
                                      @RequestParam(required = false, value = "client_id") String clientId,
-                                     @RequestParam(required = false, value = "redirect_uri") String redirectUri) {
+                                     @RequestParam(required = false, value = "redirect_uri") String redirectUri,
+                                     HttpServletResponse response) {
+        if(!IdentityZoneHolder.get().getConfig().getLinks().getSelfService().isSelfServiceLinksEnabled()) {
+            return handleSelfServiceDisabled(model, response, "error_message_code", "self_service_disabled");
+        }
         model.addAttribute("client_id", clientId);
         model.addAttribute("redirect_uri", redirectUri);
         return "forgot_password";
     }
 
     @RequestMapping(value = "/forgot_password.do", method = RequestMethod.POST)
-    public String forgotPassword(Model model, @RequestParam("email") String email, @RequestParam(value = "client_id", defaultValue = "") String clientId,
+    public String forgotPassword(Model model, @RequestParam("username") String username, @RequestParam(value = "client_id", defaultValue = "") String clientId,
                                  @RequestParam(value = "redirect_uri", defaultValue = "") String redirectUri, HttpServletResponse response) {
-        if (emailPattern.matcher(email).matches()) {
-            forgotPassword(email, clientId, redirectUri);
-            return "redirect:email_sent?code=reset_password";
-        } else {
-            return handleUnprocessableEntity(model, response, "message_code", "form_error");
+        if(!IdentityZoneHolder.get().getConfig().getLinks().getSelfService().isSelfServiceLinksEnabled()) {
+            return handleSelfServiceDisabled(model, response, "error_message_code", "self_service_disabled");
         }
+        forgotPassword(username, clientId, redirectUri);
+        return "redirect:email_sent?code=reset_password";
     }
 
-    private void forgotPassword(String email, String clientId, String redirectUri) {
+    private void forgotPassword(String username, String clientId, String redirectUri) {
         String subject = getSubjectText();
         String htmlContent = null;
         String userId = null;
+        String email = null;
 
         try {
-            ForgotPasswordInfo forgotPasswordInfo = resetPasswordService.forgotPassword(email, clientId, redirectUri);
+            ForgotPasswordInfo forgotPasswordInfo = resetPasswordService.forgotPassword(username, clientId, redirectUri);
             userId = forgotPasswordInfo.getUserId();
-            htmlContent = getCodeSentEmailHtml(forgotPasswordInfo.getResetPasswordCode().getCode(), email);
+            email = forgotPasswordInfo.getEmail();
+            htmlContent = getCodeSentEmailHtml(forgotPasswordInfo.getResetPasswordCode().getCode());
         } catch (ConflictException e) {
+            email = e.getEmail();
             htmlContent = getResetUnavailableEmailHtml(email);
             userId = e.getUserId();
         } catch (NotFoundException e) {
-            logger.error("User with email address " + email + " not found.");
-            throw new NotFoundException("Email address can not be found.");
+            logger.error("User with email address " + username + " not found.");
         }
 
         if (htmlContent != null && userId != null) {
@@ -136,16 +125,13 @@ public class ResetPasswordController {
         return serviceName + " account password reset request";
     }
 
-    private String getCodeSentEmailHtml(String code, String email) {
-        //String resetUrl = UaaUrlUtils.getUaaUrl("/reset_password");
-        //TODO: uaa under edge server and based on configurations in edge server resetUrl will address to invalid reset page
-        String resetUrl = c2sUaaHost + "/reset_password";
+    private String getCodeSentEmailHtml(String code) {
+        String resetUrl = UaaUrlUtils.getUaaUrl("/reset_password");
 
         final Context ctx = new Context();
         ctx.setVariable("serviceName", getServiceName());
         ctx.setVariable("code", code);
         ctx.setVariable("resetUrl", resetUrl);
-        ctx.setVariable("email", email);
         return templateEngine.process("reset_password", ctx);
     }
 
@@ -161,6 +147,7 @@ public class ResetPasswordController {
 
     private String getServiceName() {
         if (IdentityZoneHolder.get().equals(IdentityZone.getUaa())) {
+            String companyName = IdentityZoneHolder.resolveBranding().getCompanyName();
             return StringUtils.hasText(companyName) ? companyName : "Cloud Foundry";
         } else {
             return IdentityZoneHolder.get().getName();
@@ -177,21 +164,22 @@ public class ResetPasswordController {
                                     HttpServletResponse response,
                                     @RequestParam("code") String code) {
 
-        ExpiringCode expiringCode = validateUserAndClient(codeStore.retrieveCode(code));
+        ExpiringCode expiringCode = checkIfUserExists(codeStore.retrieveCode(code, IdentityZoneHolder.get().getId()));
         if (expiringCode==null) {
             return handleUnprocessableEntity(model, response, "message_code", "bad_code");
         } else {
-            PasswordChange change = JsonUtils.readValue(expiringCode.getData(), PasswordChange.class);
-            UaaUser user = userDatabase.retrieveUserById(change.getUserId());
-            String email = user.getEmail();
-            Timestamp fiveMinutes = new Timestamp(System.currentTimeMillis()+(1000*60*5));
-            model.addAttribute("code", codeStore.generateCode(expiringCode.getData(), fiveMinutes, null).getCode());
-            model.addAttribute("email", email);
+            PasswordChange passwordChange = JsonUtils.readValue(expiringCode.getData(), PasswordChange.class);
+            String userId = passwordChange.getUserId();
+            UaaUser uaaUser = userDatabase.retrieveUserById(userId);
+            String newCode = codeStore.generateCode(expiringCode.getData(), new Timestamp(System.currentTimeMillis() + (10 * 60 * 1000)), expiringCode.getIntent(), IdentityZoneHolder.get().getId()).getCode();
+            model.addAttribute("code", newCode);
+            model.addAttribute("email", uaaUser.getEmail());
+            model.addAttribute("username", uaaUser.getUsername());
             return "reset_password";
         }
     }
 
-    public ExpiringCode validateUserAndClient(ExpiringCode code) {
+    private ExpiringCode checkIfUserExists(ExpiringCode code) {
         if (code==null) {
             logger.debug("reset_password ExpiringCode object is null. Aborting.");
             return null;
@@ -216,47 +204,27 @@ public class ResetPasswordController {
     }
 
     @RequestMapping(value = "/reset_password.do", method = RequestMethod.POST)
-    public String resetPassword(Model model,
-                                @RequestParam("code") String code,
-                                @RequestParam("email") String email,
-                                @RequestParam("password") String password,
-                                @RequestParam("password_confirmation") String passwordConfirmation,
-                                HttpServletResponse response,
-                                HttpSession session) {
+    public void resetPassword(Model model,
+                              @RequestParam("code") String code,
+                              @RequestParam("email") String email,
+                              @RequestParam("password") String password,
+                              @RequestParam("password_confirmation") String passwordConfirmation,
+                              HttpServletRequest request,
+                              HttpServletResponse response,
+                              HttpSession session) {
 
-        PasswordConfirmationValidation validation = new PasswordConfirmationValidation(password, passwordConfirmation);
-        if (!validation.valid()) {
-            model.addAttribute("message_code", validation.getMessageCode());
-            model.addAttribute("email", email);
-            model.addAttribute("code", code);
-            response.setStatus(HttpStatus.UNPROCESSABLE_ENTITY.value());
-            return "reset_password";
-        }
 
-        try {
-            ResetPasswordService.ResetPasswordResponse resetPasswordResponse = resetPasswordService.resetPassword(code, password);
-            ScimUser user = resetPasswordResponse.getUser();
-            UaaPrincipal uaaPrincipal = new UaaPrincipal(user.getId(), user.getUserName(), user.getPrimaryEmail(), OriginKeys.UAA, null, IdentityZoneHolder.get().getId());
-            UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(uaaPrincipal, null, UaaAuthority.USER_AUTHORITIES);
-            SecurityContextHolder.getContext().setAuthentication(token);
-
-            String redirectLocation = resetPasswordResponse.getRedirectUri();
-            SavedRequest savedRequest = (SavedRequest) session.getAttribute("SPRING_SECURITY_SAVED_REQUEST");
-            if (redirectLocation.equals("home") && savedRequest != null && savedRequest.getRedirectUrl() != null) {
-                redirectLocation = savedRequest.getRedirectUrl();
-            }
-
-            return "redirect:" + redirectLocation;
-        } catch (UaaException e) {
-            return handleUnprocessableEntity(model, response, "message_code", "bad_code");
-        } catch (InvalidPasswordException e) {
-            return handleUnprocessableEntity(model, response, "message", e.getMessagesAsOneString());
-        }
     }
 
     private String handleUnprocessableEntity(Model model, HttpServletResponse response, String attributeKey, String attributeValue) {
         model.addAttribute(attributeKey, attributeValue);
         response.setStatus(HttpStatus.UNPROCESSABLE_ENTITY.value());
         return "forgot_password";
+    }
+
+    private String handleSelfServiceDisabled(Model model, HttpServletResponse response, String attributeKey, String attributeValue) {
+        model.addAttribute(attributeKey, attributeValue);
+        response.setStatus(HttpStatus.NOT_FOUND.value());
+        return "error";
     }
 }

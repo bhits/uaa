@@ -1,3 +1,15 @@
+/*******************************************************************************
+ *     Cloud Foundry
+ *     Copyright (c) [2009-2017] Pivotal Software, Inc. All Rights Reserved.
+ *
+ *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
+ *     You may not use this product except in compliance with the License.
+ *
+ *     This product includes a number of subcomponents with
+ *     separate copyright notices and license terms. Your use of these
+ *     subcomponents is subject to the terms and conditions of the
+ *     subcomponent's license, as noted in the LICENSE file.
+ *******************************************************************************/
 package org.cloudfoundry.identity.uaa.login;
 
 import org.cloudfoundry.identity.uaa.TestClassNullifier;
@@ -5,17 +17,16 @@ import org.cloudfoundry.identity.uaa.client.ClientMetadata;
 import org.cloudfoundry.identity.uaa.client.JdbcClientMetadataProvisioning;
 import org.cloudfoundry.identity.uaa.home.BuildInfo;
 import org.cloudfoundry.identity.uaa.home.HomeController;
-import org.cloudfoundry.identity.uaa.home.TileInfo;
-import org.cloudfoundry.identity.uaa.login.test.ThymeleafConfig;
+import org.cloudfoundry.identity.uaa.zone.BrandingInformation;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneConfiguration;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
+import org.cloudfoundry.identity.uaa.zone.Links;
 import org.cloudfoundry.identity.uaa.zone.MultitenancyFixture;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -37,15 +48,15 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.model;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.xpath;
 
@@ -56,7 +67,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 public class HomeControllerViewTests extends TestClassNullifier {
 
     private static final String base64EncodedImg = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAABGdBTUEAALGPC/xhBQAAAAFzUkdCAK7OHOkAAAAgY0hSTQAAeiYAAICEAAD6AAAAgOgAAHUwAADqYAAAOpgAABdwnLpRPAAAAXRQTFRFAAAAOjo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ozk4Ojo6Ojk5NkZMFp/PFqDPNkVKOjo6Ojk5MFhnEq3nEqvjEqzjEbDpMFdlOjo5Ojo6Ojo6Ozg2GZ3TFqXeFKfgF6DVOjo6Ozg2G5jPGZ7ZGKHbGZvROjo6Ojo5M1FfG5vYGp3aM1BdOjo6Ojo6Ojk4KHWeH5PSHpTSKHSbOjk4Ojo6Ojs8IY/QIY/QOjs7Ojo6Ojo6Ozc0JYfJJYjKOzYyOjo5Ozc0KX7AKH/AOzUxOjo5Ojo6Ojo6Ojo6Ojs8LHi6LHi6Ojs7Ojo6Ojo6Ojo6Ojo6Ojo6L3K5L3S7LnW8LnS7Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6NlFvMmWeMmaeNVJwOjo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojk5Ojk4Ojk4Ojk5Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6FaXeFabfGZ/aGKDaHJnVG5rW////xZzURgAAAHV0Uk5TAAACPaXbAVzltTa4MykoM5HlPY/k5Iw85QnBs2D7+lzAtWD7+lyO6EKem0Ey47Mx2dYvtVZVop5Q2i4qlZAnBiGemh0EDXuddqypcHkShPJwYufmX2rvihSJ+qxlg4JiqP2HPtnW1NjZ2svRVAglGTi91RAXr3/WIQAAAAFiS0dEe0/StfwAAAAJcEhZcwAAAEgAAABIAEbJaz4AAADVSURBVBjTY2BgYGBkYmZhZWVhZmJkAANGNnYODk5ODg52NrAIIyMXBzcPLx8/NwcXIyNYQEBQSFhEVExcQgAiICklLSNbWiYnLy0lCRFQUFRSLq9QUVVUgAgwqqlraFZWaWmrqzFCTNXR1dM3MDQy1tWB2MvIaMJqamZuYWnCCHeIlbWNrZ0VG5QPFLF3cHRydoErcHVz9/D08nb3kYSY6evnHxAYFBwSGhYeAbbWNzIqOiY2Lj4hMckVoiQ5JTUtPSMzKzsH6pfcvPyCwqKc4pJcoAAA2pghnaBVZ0kAAAAldEVYdGRhdGU6Y3JlYXRlADIwMTUtMTAtMDhUMTI6NDg6MDkrMDA6MDDsQS6eAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDE1LTEwLTA4VDEyOjQ4OjA5KzAwOjAwnRyWIgAAAEZ0RVh0c29mdHdhcmUASW1hZ2VNYWdpY2sgNi43LjgtOSAyMDE0LTA1LTEyIFExNiBodHRwOi8vd3d3LmltYWdlbWFnaWNrLm9yZ9yG7QAAAAAYdEVYdFRodW1iOjpEb2N1bWVudDo6UGFnZXMAMaf/uy8AAAAYdEVYdFRodW1iOjpJbWFnZTo6aGVpZ2h0ADE5Mg8AcoUAAAAXdEVYdFRodW1iOjpJbWFnZTo6V2lkdGgAMTky06whCAAAABl0RVh0VGh1bWI6Ok1pbWV0eXBlAGltYWdlL3BuZz+yVk4AAAAXdEVYdFRodW1iOjpNVGltZQAxNDQ0MzA4NDg5qdC9PQAAAA90RVh0VGh1bWI6OlNpemUAMEJClKI+7AAAAFZ0RVh0VGh1bWI6OlVSSQBmaWxlOi8vL21udGxvZy9mYXZpY29ucy8yMDE1LTEwLTA4LzJiMjljNmYwZWRhZWUzM2ViNmM1Mzg4ODMxMjg3OTg1Lmljby5wbmdoJKG+AAAAAElFTkSuQmCC";
-
+    private static final String customFooterText = "custom footer text";
+    private static final String base64ProductLogo = "D44vIpdmc0ne8IPLEbYD2vvLpu71spjxwaLYYdj39gTYa9kyWs";
     @Autowired
     WebApplicationContext webApplicationContext;
 
@@ -72,9 +84,13 @@ public class HomeControllerViewTests extends TestClassNullifier {
         SecurityContextHolder.clearContext();
         IdentityZoneHolder.clear();
         mockMvc = MockMvcBuilders.webAppContextSetup(webApplicationContext)
-                .build();
+            .build();
         originalConfiguration = IdentityZoneHolder.get().getConfig();
-        IdentityZoneHolder.get().setConfig(new IdentityZoneConfiguration());
+        IdentityZoneConfiguration newConfiguration = new IdentityZoneConfiguration();
+        newConfiguration.setBranding(new BrandingInformation());
+        newConfiguration.getBranding().setFooterLegalText(customFooterText);
+        newConfiguration.getBranding().setProductLogo(base64ProductLogo);
+        IdentityZoneHolder.get().setConfig(newConfiguration);
     }
 
     @After
@@ -89,23 +105,27 @@ public class HomeControllerViewTests extends TestClassNullifier {
         mockMvc.perform(get("/"))
             .andExpect(xpath("//*[@id='tile-1'][text()[contains(.,'client-1')]]").exists())
             .andExpect(xpath("//*[@class='tile-1']/@href").string("http://app.launch/url"))
+
             .andExpect(xpath("//head/style[2]").string(".tile-1 .tile-icon {background-image: url(\"data:image/png;base64," + base64EncodedImg + "\")}"))
-            .andExpect(xpath("//*[@class='tile-2']").exists())
             .andExpect(xpath("//*[@id='tile-2'][text()[contains(.,'Client 2 Name')]]").exists())
-            .andExpect(xpath("//*[@id='tile-3'][text()[contains(.,'First Tile')]]").exists())
-            .andExpect(xpath("//*[@class='tile-3']/@href").string("http://example.com/login"))
-            .andExpect(xpath("//head/style[4]").string(".tile-3 .tile-icon {background-image: url(\"//example.com/image\")}"))
-            .andExpect(xpath("//*[@id='tile-4'][text()[contains(.,'Other Tile')]]").exists())
-            .andExpect(xpath("//*[@class='tile-4']/@href").string("http://other.example.com/login"))
-            .andExpect(xpath("//head/style[5]").string(".tile-4 .tile-icon {background-image: url(\"//other.example.com/image\")}"))
-            .andExpect(xpath("//*[@class='tile-5']").doesNotExist());
+            .andExpect(xpath("//*[@class='tile-2']/@href").string("http://second.url/"))
+
+            .andExpect(xpath("//*[@class='tile-3']").doesNotExist());
     }
 
     @Test
-    public void tiles_notVisible_onOtherZoneHomepage() throws Exception {
-        IdentityZone zone = MultitenancyFixture.identityZone("test", "test");
-        IdentityZoneHolder.set(zone);
-        mockMvc.perform(get("/")).andExpect(model().attributeDoesNotExist("tiles"));
+    public void tilesFromClientMetadataAndTilesConfigShown_forOtherZone() throws Exception {
+        IdentityZone identityZone = MultitenancyFixture.identityZone("test", "test");
+        IdentityZoneHolder.set(identityZone);
+        mockMvc.perform(get("/"))
+            .andExpect(xpath("//*[@id='tile-1'][text()[contains(.,'client-1')]]").exists())
+            .andExpect(xpath("//*[@class='tile-1']/@href").string("http://app.launch/url"))
+
+            .andExpect(xpath("//head/style[1]").string(".tile-1 .tile-icon {background-image: url(\"data:image/png;base64," + base64EncodedImg + "\")}"))
+            .andExpect(xpath("//*[@id='tile-2'][text()[contains(.,'Client 2 Name')]]").exists())
+            .andExpect(xpath("//*[@class='tile-2']/@href").string("http://second.url/"))
+
+            .andExpect(xpath("//*[@class='tile-3']").doesNotExist());
     }
 
     @Test
@@ -119,12 +139,61 @@ public class HomeControllerViewTests extends TestClassNullifier {
             .andExpect(status().is3xxRedirection())
             .andExpect(header().string("Location", customHomePage));
 
-        IdentityZone zone = MultitenancyFixture.identityZone("zone","zone");
+        IdentityZone zone = MultitenancyFixture.identityZone("zone", "zone");
         zone.setConfig(new IdentityZoneConfiguration());
         IdentityZoneHolder.set(zone);
         mockMvc.perform(get("/home"))
             .andExpect(status().isOk());
 
+        zone.getConfig().getLinks().setHomeRedirect(customHomePage);
+        mockMvc.perform(get("/home"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string("Location", customHomePage));
+    }
+
+    @Test
+    public void testErrorBranding() throws Exception {
+        for (String errorUrl : Arrays.asList("/error", "/error404")) {
+            mockMvc.perform(get(errorUrl))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString(customFooterText)))
+                .andExpect(content().string(containsString(base64ProductLogo)));
+        }
+    }
+
+    @Test
+    public void testConfiguredGlobalHomePage() throws Exception {
+        HomeController controller = webApplicationContext.getBean(HomeController.class);
+
+        //nothing configured
+        mockMvc.perform(get("/home"))
+            .andExpect(status().isOk());
+
+        String globalHomePage = "http://{zone.subdomain}.custom.home/{zone.id}";
+        controller.setGlobalLinks(new Links().setHomeRedirect(globalHomePage));
+
+        //global home redirect configured
+        mockMvc.perform(get("/home"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string("Location", "http://.custom.home/uaa"));
+
+        //configure home redirect on the default zone
+        String customHomePage = "http://custom.home/page";
+        IdentityZoneHolder.get().getConfig().getLinks().setHomeRedirect(customHomePage);
+        mockMvc.perform(get("/home"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string("Location", customHomePage));
+
+
+        //create a new zone, no config, inherits the global redirect
+        IdentityZone zone = MultitenancyFixture.identityZone("zoneId", "zonesubdomain");
+        zone.setConfig(new IdentityZoneConfiguration());
+        IdentityZoneHolder.set(zone);
+        mockMvc.perform(get("/home"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string("Location", "http://zonesubdomain.custom.home/zoneId"));
+
+        //zone configures its own home redirect
         zone.getConfig().getLinks().setHomeRedirect(customHomePage);
         mockMvc.perform(get("/home"))
             .andExpect(status().is3xxRedirection())
@@ -165,33 +234,19 @@ public class HomeControllerViewTests extends TestClassNullifier {
             clientMetadataDoesNotExist.setClientId("client-3");
             clientMetadataDoesNotExist.setShowOnHomePage(false);
 
+            ClientMetadata clientMetadataNoAppLaunchUrl = new ClientMetadata();
+            clientMetadataNoAppLaunchUrl.setClientId("client-4");
+            clientMetadataNoAppLaunchUrl.setShowOnHomePage(true);
+
             List<ClientMetadata> clientMetadataList = new ArrayList<>();
             clientMetadataList.add(clientMetadata1);
             clientMetadataList.add(clientMetadata2);
             clientMetadataList.add(clientMetadataDoesNotExist);
+            clientMetadataList.add(clientMetadataNoAppLaunchUrl);
 
             JdbcClientMetadataProvisioning clientMetadata = mock(JdbcClientMetadataProvisioning.class);
-            when(clientMetadata.retrieveAll()).thenReturn(clientMetadataList);
+            when(clientMetadata.retrieveAll(anyString())).thenReturn(clientMetadataList);
             return clientMetadata;
-        }
-
-        @Bean
-        TileInfo tileInfo() {
-            Map<String,String> tile1 = new LinkedHashMap<>();
-            tile1.put("name", "First Tile");
-            tile1.put("login-link", "http://example.com/login");
-            tile1.put("image", "//example.com/image");
-            tile1.put("image-hover", "//example.com/hover");
-
-            Map<String,String> tile2 = new LinkedHashMap<>();
-            tile2.put("name", "Other Tile");
-            tile2.put("login-link", "http://other.example.com/login");
-            tile2.put("image", "//other.example.com/image");
-            tile2.put("image-hover", "//other.example.com/hover");
-
-            TileInfo tileInfo = Mockito.mock(TileInfo.class);
-            Mockito.when(tileInfo.getLoginTiles()).thenReturn(Arrays.asList(tile1, tile2));
-            return tileInfo;
         }
 
         @Bean

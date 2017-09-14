@@ -17,7 +17,6 @@ import org.cloudfoundry.identity.uaa.mock.InjectedMockContextTest;
 import org.cloudfoundry.identity.uaa.scim.ScimGroup;
 import org.cloudfoundry.identity.uaa.scim.ScimGroupMember;
 import org.cloudfoundry.identity.uaa.scim.ScimUser;
-import org.cloudfoundry.identity.uaa.test.TestClient;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.cloudfoundry.identity.uaa.util.SetServerNameRequestPostProcessor;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
@@ -36,20 +35,17 @@ import static org.cloudfoundry.identity.uaa.zone.IdentityZoneSwitchingFilter.HEA
 import static org.cloudfoundry.identity.uaa.zone.IdentityZoneSwitchingFilter.SUBDOMAIN_HEADER;
 import static org.junit.Assert.assertEquals;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 public class IdentityZoneSwitchingFilterMockMvcTest extends InjectedMockContextTest {
 
-    private TestClient testClient;
     private String identityToken;
     private String adminToken;
     private RandomValueStringGenerator generator;
 
     @Before
     public void setUp() throws Exception {
-        testClient = new TestClient(getMockMvc());
         identityToken = testClient.getClientCredentialsOAuthAccessToken(
                 "identity",
                 "identitysecret",
@@ -74,7 +70,8 @@ public class IdentityZoneSwitchingFilterMockMvcTest extends InjectedMockContextT
         ClientDetails client = createClientInOtherZone(zoneAdminToken, status().isCreated(), HEADER, zoneId);
 
         // Authenticate with new Client in new Zone
-        getMockMvc().perform(get("/oauth/token?grant_type=client_credentials")
+        getMockMvc().perform(post("/oauth/token")
+            .param("grant_type","client_credentials")
             .header("Authorization", "Basic "
                 + new String(Base64.encodeBase64((client.getClientId() + ":" + client.getClientSecret()).getBytes())))
             .with(new SetServerNameRequestPostProcessor(identityZone.getSubdomain() + ".localhost")))
@@ -87,7 +84,9 @@ public class IdentityZoneSwitchingFilterMockMvcTest extends InjectedMockContextT
         String zoneAdminToken = utils().getZoneAdminToken(getMockMvc(),adminToken, identityZone.getId());
         ClientDetails client = createClientInOtherZone(zoneAdminToken, status().isCreated(), SUBDOMAIN_HEADER, identityZone.getSubdomain());
 
-        getMockMvc().perform(get("/oauth/token?grant_type=client_credentials")
+        getMockMvc().perform(
+            post("/oauth/token")
+                .param("grant_type","client_credentials")
                 .header("Authorization", "Basic "
                         + new String(Base64.encodeBase64((client.getClientId() + ":" + client.getClientSecret()).getBytes())))
                 .with(new SetServerNameRequestPostProcessor(identityZone.getSubdomain() + ".localhost")))
@@ -109,10 +108,12 @@ public class IdentityZoneSwitchingFilterMockMvcTest extends InjectedMockContextT
                 .content(JsonUtils.writeValueAsString(client)))
                 .andExpect(status().isCreated());
 
-        getMockMvc().perform(get("/oauth/token?grant_type=client_credentials")
+        getMockMvc().perform(
+            post("/oauth/token")
+                .param("grant_type", "client_credentials")
                 .header("Authorization", "Basic "
-                        + new String(Base64.encodeBase64((client.getClientId() + ":" + client.getClientSecret()).getBytes()))))
-                .andExpect(status().isOk());
+                    + new String(Base64.encodeBase64((client.getClientId() + ":" + client.getClientSecret()).getBytes()))))
+            .andExpect(status().isOk());
     }
 
     @Test

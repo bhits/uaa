@@ -13,6 +13,7 @@
 package org.cloudfoundry.identity.uaa.provider;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.springframework.util.StringUtils;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
@@ -29,11 +30,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefinition {
-
-    public static final String DEFAULT_HTTP_SOCKET_FACTORY = "org.apache.commons.httpclient.protocol.DefaultProtocolSocketFactory";
-    public static final String DEFAULT_HTTPS_SOCKET_FACTORY = "org.apache.commons.httpclient.contrib.ssl.EasySSLProtocolSocketFactory";
 
     public enum MetadataLocation {
         URL,
@@ -53,17 +51,18 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
     private int assertionConsumerIndex;
     private boolean metadataTrustCheck;
     private boolean showSamlLink;
-    private String socketFactoryClassName;
     private String linkText;
     private String iconUrl;
-    private boolean addShadowUserOnLogin = true;
     private ExternalGroupMappingMode groupMappingMode = ExternalGroupMappingMode.EXPLICITLY_MAPPED;
+    private boolean skipSslValidation = false;
+    private List<String> authnContext;
 
     public SamlIdentityProviderDefinition() {}
 
     public SamlIdentityProviderDefinition clone() {
         List<String> emailDomain = getEmailDomain() != null ? new ArrayList<>(getEmailDomain()) : null;
         List<String> externalGroupsWhitelist = getExternalGroupsWhitelist() != null ? new ArrayList<>(getExternalGroupsWhitelist()) : null;
+        List<String> authnContext = getAuthnContext() != null ? new ArrayList<>(getAuthnContext()) : null;
         Map<String, Object> attributeMappings = getAttributeMappings() != null ? new HashMap(getAttributeMappings()) : null;
         SamlIdentityProviderDefinition def = new SamlIdentityProviderDefinition();
         def.setMetaDataLocation(metaDataLocation);
@@ -75,13 +74,17 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
         def.setShowSamlLink(showSamlLink);
         def.setLinkText(linkText);
         def.setIconUrl(iconUrl);
-        def.setAddShadowUserOnLogin(addShadowUserOnLogin);
+        def.setAddShadowUserOnLogin(isAddShadowUserOnLogin());
         def.setEmailDomain(emailDomain);
         def.setExternalGroupsWhitelist(externalGroupsWhitelist);
         def.setAttributeMappings(attributeMappings);
         def.setAdditionalConfiguration(getAdditionalConfiguration());
         def.setProviderDescription(getProviderDescription());
         def.setGroupMappingMode(getGroupMappingMode());
+        def.setSocketFactoryClassName(getSocketFactoryClassName());
+        def.setSkipSslValidation(isSkipSslValidation());
+        def.setStoreCustomAttributes(isStoreCustomAttributes());
+        def.setAuthnContext(authnContext);
         return def;
     }
 
@@ -111,6 +114,7 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
         }
         try {
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setExpandEntityReferences(false);
             DocumentBuilder builder = factory.newDocumentBuilder();
             builder.parse(new InputSource(new StringReader(xml)));
         } catch (ParserConfigurationException | SAXException | IOException e) {
@@ -144,6 +148,15 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
 
     public SamlIdentityProviderDefinition setNameID(String nameID) {
         this.nameID = nameID;
+        return this;
+    }
+
+    public List<String> getAuthnContext() {
+        return authnContext;
+    }
+
+    public SamlIdentityProviderDefinition setAuthnContext(List<String> authnContext) {
+        this.authnContext = authnContext;
         return this;
     }
 
@@ -183,34 +196,11 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
     }
 
     public String getSocketFactoryClassName() {
-        if (socketFactoryClassName!=null && socketFactoryClassName.trim().length()>0) {
-            return socketFactoryClassName;
-        }
-        if (getMetaDataLocation()==null || getMetaDataLocation().trim().length()==0) {
-            throw new IllegalStateException("Invalid meta data URL[" + getMetaDataLocation() + "] cannot determine socket factory.");
-        }
-        if (getMetaDataLocation().startsWith("https")) {
-            return DEFAULT_HTTPS_SOCKET_FACTORY;
-        } else {
-            return DEFAULT_HTTP_SOCKET_FACTORY;
-        }
+        return null;
     }
 
     public SamlIdentityProviderDefinition setSocketFactoryClassName(String socketFactoryClassName) {
-        if (socketFactoryClassName!=null && socketFactoryClassName.trim().length()>0) {
-            try {
-                Class.forName(
-                    socketFactoryClassName,
-                    true,
-                    Thread.currentThread().getContextClassLoader()
-                );
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(e);
-            } catch (ClassCastException e) {
-                throw new IllegalArgumentException(e);
-            }
-        }
-        this.socketFactoryClassName = socketFactoryClassName;
+        //no op
         return this;
     }
 
@@ -241,19 +231,19 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
         return this;
     }
 
-    public boolean isAddShadowUserOnLogin() {
-        return addShadowUserOnLogin;
+    public boolean isSkipSslValidation() {
+        return skipSslValidation;
     }
 
-    public SamlIdentityProviderDefinition setAddShadowUserOnLogin(boolean addShadowUserOnLogin) {
-        this.addShadowUserOnLogin = addShadowUserOnLogin;
-        return this;
+    public void setSkipSslValidation(boolean skipSslValidation) {
+        this.skipSslValidation = skipSslValidation;
     }
 
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
+        if (!super.equals(o)) return false;
 
         SamlIdentityProviderDefinition that = (SamlIdentityProviderDefinition) o;
 
@@ -280,11 +270,12 @@ public class SamlIdentityProviderDefinition extends ExternalIdentityProviderDefi
             ", assertionConsumerIndex=" + assertionConsumerIndex +
             ", metadataTrustCheck=" + metadataTrustCheck +
             ", showSamlLink=" + showSamlLink +
-            ", socketFactoryClassName='" + socketFactoryClassName + '\'' +
+            ", socketFactoryClassName='deprected-not used'" +
+            ", skipSslValidation=" + skipSslValidation +
             ", linkText='" + linkText + '\'' +
             ", iconUrl='" + iconUrl + '\'' +
             ", zoneId='" + zoneId + '\'' +
-            ", addShadowUserOnLogin='" + addShadowUserOnLogin + '\'' +
+            ", addShadowUserOnLogin='" + isAddShadowUserOnLogin() + '\'' +
             '}';
     }
 

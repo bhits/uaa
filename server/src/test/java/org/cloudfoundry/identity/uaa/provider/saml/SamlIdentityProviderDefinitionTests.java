@@ -2,17 +2,22 @@ package org.cloudfoundry.identity.uaa.provider.saml;
 
 import org.apache.commons.httpclient.contrib.ssl.StrictSSLProtocolSocketFactory;
 import org.cloudfoundry.identity.uaa.provider.SamlIdentityProviderDefinition;
+import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.junit.Before;
 import org.junit.Test;
+import org.springframework.util.ReflectionUtils;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.util.Arrays;
 
 import static org.cloudfoundry.identity.uaa.provider.SamlIdentityProviderDefinition.MetadataLocation.DATA;
 import static org.cloudfoundry.identity.uaa.provider.SamlIdentityProviderDefinition.MetadataLocation.UNKNOWN;
 import static org.cloudfoundry.identity.uaa.provider.SamlIdentityProviderDefinition.MetadataLocation.URL;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public class SamlIdentityProviderDefinitionTests {
 
@@ -20,7 +25,11 @@ public class SamlIdentityProviderDefinitionTests {
 
     @Before
     public void createDefinition() {
-        definition = new SamlIdentityProviderDefinition()
+        definition = buildSamlIdentityProviderDefinition();
+    }
+
+    private SamlIdentityProviderDefinition buildSamlIdentityProviderDefinition() {
+        return new SamlIdentityProviderDefinition()
             .setMetaDataLocation("location")
             .setIdpEntityAlias("alias")
             .setNameID("nameID")
@@ -29,6 +38,26 @@ public class SamlIdentityProviderDefinitionTests {
             .setLinkText("link test")
             .setIconUrl("url")
             .setZoneId("zoneId");
+    }
+
+    @Test
+    public void testEquals() {
+        definition.setAddShadowUserOnLogin(true);
+
+        SamlIdentityProviderDefinition definition2 = buildSamlIdentityProviderDefinition();
+        definition2.setAddShadowUserOnLogin(false);
+
+        assertNotEquals(definition, definition2);
+
+        definition2.setAddShadowUserOnLogin(true);
+        assertEquals(definition, definition2);
+    }
+
+    @Test
+    public void test_serialize_custom_attributes_field() {
+        definition.setStoreCustomAttributes(true);
+        SamlIdentityProviderDefinition def = JsonUtils.readValue(JsonUtils.writeValueAsString(definition), SamlIdentityProviderDefinition.class);
+        assertTrue(def.isStoreCustomAttributes());
     }
 
     @Test
@@ -58,6 +87,26 @@ public class SamlIdentityProviderDefinitionTests {
     public void test_XML_with_DOCTYPE_Fails() {
         definition.setMetaDataLocation(IDP_METADATA.replace("<?xml version=\"1.0\"?>\n", "<?xml version=\"1.0\"?>\n<!DOCTYPE>"));
         assertEquals(UNKNOWN, definition.getType());
+    }
+
+    @Test
+    public void test_clone() throws Exception {
+        definition.setMetaDataLocation("http://dadas.dadas.dadas/sdada");
+        definition.setSkipSslValidation(true);
+        definition.setStoreCustomAttributes(true);
+        SamlIdentityProviderDefinition def = definition.clone();
+        ReflectionUtils.doWithFields(SamlIdentityProviderDefinition.class,
+                                     new ReflectionUtils.FieldCallback() {
+                                         @Override
+                                         public void doWith(Field f) throws IllegalArgumentException, IllegalAccessException {
+                                             f.setAccessible(true);
+                                             f.setAccessible(true);
+                                             Object expectedValue = f.get(definition);
+                                             Object actualValue = f.get(def);
+                                             assertEquals(f.getName(), expectedValue, actualValue);
+                                         }
+                                     });
+
 
     }
 
@@ -75,7 +124,7 @@ public class SamlIdentityProviderDefinitionTests {
 
     @Test
     public void test_Get_URL_When_Valid() throws Exception {
-        definition.setMetaDataLocation("http://login.identity.cf-app.com/saml/metadata");
+        definition.setMetaDataLocation("http://login.uaa-acceptance.cf-app.com/saml/metadata");
         assertEquals(URL, definition.getType());
     }
 
@@ -143,25 +192,34 @@ public class SamlIdentityProviderDefinitionTests {
         assertEquals("test.com", def.getEmailDomain().get(0));
     }
 
+    @Test
+    public void testDefaultAuthnContext() {
+        SamlIdentityProviderDefinition def = new SamlIdentityProviderDefinition();
+        assertEquals(null, def.getAuthnContext());
+    }
+
+    @Test
+    public void testSetAuthnContext() {
+        SamlIdentityProviderDefinition def = new SamlIdentityProviderDefinition();
+        def.setAuthnContext(Arrays.asList("a-custom-context"));
+        assertEquals("a-custom-context", def.getAuthnContext().get(0));
+    }
 
     @Test
     public void testGetSocketFactoryClassName() throws Exception {
         SamlIdentityProviderDefinition def = new SamlIdentityProviderDefinition();
         def.setMetaDataLocation("https://dadas.dadas.dadas/sdada");
-        assertEquals("org.apache.commons.httpclient.contrib.ssl.EasySSLProtocolSocketFactory", def.getSocketFactoryClassName());
+        assertNull(def.getSocketFactoryClassName());
         def.setMetaDataLocation("http://dadas.dadas.dadas/sdada");
-        assertEquals("org.apache.commons.httpclient.protocol.DefaultProtocolSocketFactory", def.getSocketFactoryClassName());
+        assertNull(def.getSocketFactoryClassName());
         def.setSocketFactoryClassName("");
-        assertEquals("org.apache.commons.httpclient.protocol.DefaultProtocolSocketFactory", def.getSocketFactoryClassName());
+        assertNull(def.getSocketFactoryClassName());
         def.setSocketFactoryClassName(null);
-        assertEquals("org.apache.commons.httpclient.protocol.DefaultProtocolSocketFactory", def.getSocketFactoryClassName());
-        try {
-            def.setSocketFactoryClassName("test.class.that.DoesntExist");
-            fail("ClassNotFound is expected here");
-        } catch (IllegalArgumentException x) {
-            assertEquals(ClassNotFoundException.class, x.getCause().getClass());
-        }
+        assertNull(def.getSocketFactoryClassName());
+        def.setSocketFactoryClassName("test.class.that.DoesntExist");
+        assertNull(def.getSocketFactoryClassName());
         def.setSocketFactoryClassName(StrictSSLProtocolSocketFactory.class.getName());
-        assertEquals(StrictSSLProtocolSocketFactory.class.getName(), def.getSocketFactoryClassName());
+        assertNull(def.getSocketFactoryClassName());
+
     }
 }

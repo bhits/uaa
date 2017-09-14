@@ -13,14 +13,15 @@
 package org.cloudfoundry.identity.uaa.provider.saml;
 
 import org.apache.commons.httpclient.params.HttpClientParams;
-import org.apache.commons.httpclient.protocol.ProtocolSocketFactory;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.http.client.utils.URIBuilder;
+import org.cloudfoundry.identity.uaa.cache.UrlContentCache;
 import org.cloudfoundry.identity.uaa.constants.OriginKeys;
 import org.cloudfoundry.identity.uaa.provider.IdentityProvider;
 import org.cloudfoundry.identity.uaa.provider.IdentityProviderProvisioning;
 import org.cloudfoundry.identity.uaa.provider.SamlIdentityProviderDefinition;
+import org.cloudfoundry.identity.uaa.util.UaaHttpRequestUtils;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.opensaml.saml2.metadata.provider.MetadataProviderException;
@@ -29,6 +30,7 @@ import org.springframework.beans.factory.InitializingBean;
 import org.springframework.security.saml.metadata.ExtendedMetadata;
 import org.springframework.security.saml.metadata.ExtendedMetadataDelegate;
 import org.springframework.util.StringUtils;
+import org.springframework.web.client.RestTemplate;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -46,6 +48,7 @@ public class SamlIdentityProviderConfigurator implements InitializingBean {
     private HttpClientParams clientParams;
     private BasicParserPool parserPool;
     private IdentityProviderProvisioning providerProvisioning;
+    private UrlContentCache contentCache;
 
     private Timer dummyTimer = new Timer() {
         @Override public void cancel() { super.cancel(); }
@@ -60,6 +63,15 @@ public class SamlIdentityProviderConfigurator implements InitializingBean {
 
     public SamlIdentityProviderConfigurator() {
         dummyTimer.cancel();
+    }
+
+    public UrlContentCache getContentCache() {
+        return contentCache;
+    }
+
+    public SamlIdentityProviderConfigurator setContentCache(UrlContentCache contentCache) {
+        this.contentCache = contentCache;
+        return this;
     }
 
     public List<SamlIdentityProviderDefinition> getIdentityProviderDefinitions() {
@@ -93,10 +105,9 @@ public class SamlIdentityProviderConfigurator implements InitializingBean {
     /**
      * adds or replaces a SAML identity proviider
      * @param providerDefinition - the provider to be added
-     * @return an array consisting of {provider-added, provider-deleted} where provider-deleted may be null
      * @throws MetadataProviderException if the system fails to fetch meta data for this provider
      */
-    public synchronized ExtendedMetadataDelegate[] addSamlIdentityProviderDefinition(SamlIdentityProviderDefinition providerDefinition) throws MetadataProviderException {
+    public synchronized void validateSamlIdentityProviderDefinition(SamlIdentityProviderDefinition providerDefinition) throws MetadataProviderException {
         ExtendedMetadataDelegate added, deleted=null;
         if (providerDefinition==null) {
             throw new NullPointerException();
@@ -128,8 +139,6 @@ public class SamlIdentityProviderConfigurator implements InitializingBean {
         if (entityIDexists) {
             throw new MetadataProviderException("Duplicate entity ID:"+entityIDToBeAdded);
         }
-
-        return new ExtendedMetadataDelegate[] {added, deleted};
     }
 
     public synchronized ExtendedMetadataDelegate removeIdentityProviderDefinition(SamlIdentityProviderDefinition providerDefinition) {
@@ -189,12 +198,14 @@ public class SamlIdentityProviderConfigurator implements InitializingBean {
     protected FixedHttpMetaDataProvider getFixedHttpMetaDataProvider(SamlIdentityProviderDefinition def,
                                                                      Timer dummyTimer,
                                                                      HttpClientParams params) throws ClassNotFoundException, MetadataProviderException, URISyntaxException, InstantiationException, IllegalAccessException {
-        Class<ProtocolSocketFactory> socketFactory;
-        socketFactory = (Class<ProtocolSocketFactory>) Class.forName(def.getSocketFactoryClassName());
         ExtendedMetadata extendedMetadata = new ExtendedMetadata();
         extendedMetadata.setAlias(def.getIdpEntityAlias());
-        FixedHttpMetaDataProvider fixedHttpMetaDataProvider = FixedHttpMetaDataProvider.buildProvider(dummyTimer, getClientParams(), adjustURIForPort(def.getMetaDataLocation()));
-        fixedHttpMetaDataProvider.setSocketFactory(socketFactory.newInstance());
+        RestTemplate template = new RestTemplate(UaaHttpRequestUtils.createRequestFactory(def.isSkipSslValidation()));
+        FixedHttpMetaDataProvider fixedHttpMetaDataProvider =
+            FixedHttpMetaDataProvider.buildProvider(dummyTimer, getClientParams(),
+                                                    adjustURIForPort(def.getMetaDataLocation()),
+                                                    template,
+                                                    this.contentCache);
         return fixedHttpMetaDataProvider;
     }
 

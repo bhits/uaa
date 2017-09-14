@@ -4,7 +4,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.util.StringUtils;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -22,15 +21,24 @@ public class EmailService implements MessageService {
 
     private JavaMailSender mailSender;
     private final String loginUrl;
-    private final String companyName;
+    private final String fromAddress;
 
-    @Value("${smtp.fromAddress}")
-    private String fromAddress;
-
-    public EmailService(JavaMailSender mailSender, String loginUrl, String companyName) {
+    public EmailService(JavaMailSender mailSender, String loginUrl, String fromAddress) {
         this.mailSender = mailSender;
         this.loginUrl = loginUrl;
-        this.companyName = companyName;
+
+        // if we are provided a from address use that, if not fallback to default based on loginUrl
+        if (fromAddress != null && !fromAddress.isEmpty()) {
+            this.fromAddress = fromAddress;
+        } else {
+            String host = UriComponentsBuilder.fromHttpUrl(loginUrl).build().getHost();
+            this.fromAddress = "admin@" + host;
+        }
+
+    }
+
+    public String getFromAddress() {
+        return fromAddress;
     }
 
     public JavaMailSender getMailSender() {
@@ -42,15 +50,14 @@ public class EmailService implements MessageService {
     }
 
     private Address[] getSenderAddresses() throws AddressException, UnsupportedEncodingException {
-        String host = UriComponentsBuilder.fromHttpUrl(loginUrl).build().getHost();
         String name = null;
         if (IdentityZoneHolder.get().equals(IdentityZone.getUaa())) {
+            String companyName = IdentityZoneHolder.resolveBranding().getCompanyName();
             name = StringUtils.hasText(companyName) ? companyName : "Cloud Foundry";
         } else {
             name = IdentityZoneHolder.get().getName();
         }
-        //TODO: Remove hard-coded fromAddress when upgrade to latest version
-        // return new Address[]{new InternetAddress("admin@" + host, name)};
+
         return new Address[]{new InternetAddress(fromAddress, name)};
     }
 

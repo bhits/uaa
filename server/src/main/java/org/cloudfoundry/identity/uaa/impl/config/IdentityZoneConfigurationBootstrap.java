@@ -13,6 +13,10 @@
 package org.cloudfoundry.identity.uaa.impl.config;
 
 import org.cloudfoundry.identity.uaa.login.Prompt;
+import org.cloudfoundry.identity.uaa.saml.SamlKey;
+import org.cloudfoundry.identity.uaa.zone.ClientSecretPolicy;
+import org.cloudfoundry.identity.uaa.util.JsonUtils;
+import org.cloudfoundry.identity.uaa.zone.BrandingInformation;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneConfiguration;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneProvisioning;
@@ -20,21 +24,25 @@ import org.cloudfoundry.identity.uaa.zone.IdentityZoneValidator;
 import org.cloudfoundry.identity.uaa.zone.InvalidIdentityZoneDetailsException;
 import org.cloudfoundry.identity.uaa.zone.TokenPolicy;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.beans.factory.annotation.Autowired;
 
+import java.util.Collection;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
+import static java.util.Collections.EMPTY_MAP;
 import static java.util.Objects.nonNull;
+import static java.util.Optional.ofNullable;
 import static org.springframework.util.StringUtils.hasText;
 
 public class IdentityZoneConfigurationBootstrap implements InitializingBean {
 
+    private ClientSecretPolicy clientSecretPolicy;
     private TokenPolicy tokenPolicy;
     private IdentityZoneProvisioning provisioning;
     private boolean selfServiceLinksEnabled = true;
     private String homeRedirect = null;
-    private Map<String,String> selfServiceLinks;
+    private Map<String,Object> selfServiceLinks;
     private List<String> logoutRedirectWhitelist;
     private String logoutRedirectParameterName;
     private String logoutDefaultRedirectUrl;
@@ -44,10 +52,18 @@ public class IdentityZoneConfigurationBootstrap implements InitializingBean {
     private String samlSpPrivateKey;
     private String samlSpPrivateKeyPassphrase;
     private String samlSpCertificate;
+
+    private Map<String, Map<String, String>> samlKeys;
+    private String activeKeyId;
+
     private boolean idpDiscoveryEnabled = false;
 
-    @Autowired
+    private boolean accountChooserEnabled;
+
+    private Collection<String> defaultUserGroups;
+
     private IdentityZoneValidator validator = (config, mode) -> config;
+    private Map<String, Object> branding;
 
     public void setValidator(IdentityZoneValidator validator) {
         this.validator = validator;
@@ -61,16 +77,25 @@ public class IdentityZoneConfigurationBootstrap implements InitializingBean {
     public void afterPropertiesSet() throws InvalidIdentityZoneDetailsException {
         IdentityZone identityZone = provisioning.retrieve(IdentityZone.getUaa().getId());
         IdentityZoneConfiguration definition = new IdentityZoneConfiguration(tokenPolicy);
+        definition.setClientSecretPolicy(clientSecretPolicy);
         definition.getLinks().getSelfService().setSelfServiceLinksEnabled(selfServiceLinksEnabled);
         definition.getLinks().setHomeRedirect(homeRedirect);
         definition.getSamlConfig().setCertificate(samlSpCertificate);
         definition.getSamlConfig().setPrivateKey(samlSpPrivateKey);
         definition.getSamlConfig().setPrivateKeyPassword(samlSpPrivateKeyPassphrase);
         definition.setIdpDiscoveryEnabled(idpDiscoveryEnabled);
+        definition.setAccountChooserEnabled(accountChooserEnabled);
+
+        samlKeys = ofNullable(samlKeys).orElse(EMPTY_MAP);
+        for (Map.Entry<String, Map<String,String>> entry : samlKeys.entrySet()) {
+            SamlKey samlKey = new SamlKey(entry.getValue().get("key"), entry.getValue().get("passphrase"), entry.getValue().get("certificate"));
+            definition.getSamlConfig().addKey(entry.getKey(), samlKey);
+        }
+        definition.getSamlConfig().setActiveKeyId(this.activeKeyId);
 
         if (selfServiceLinks!=null) {
-            String signup = selfServiceLinks.get("signup");
-            String passwd = selfServiceLinks.get("passwd");
+            String signup = (String)selfServiceLinks.get("signup");
+            String passwd = (String)selfServiceLinks.get("passwd");
             if (hasText(signup)) {
                 definition.getLinks().getSelfService().setSignup(signup);
             }
@@ -92,13 +117,33 @@ public class IdentityZoneConfigurationBootstrap implements InitializingBean {
             definition.setPrompts(prompts);
         }
 
+        BrandingInformation brandingInfo = JsonUtils.convertValue(branding, BrandingInformation.class);
+        definition.setBranding(brandingInfo);
+
+        if (defaultUserGroups!=null) {
+            definition.getUserConfig().setDefaultGroups(new LinkedList<>(defaultUserGroups));
+        }
+
+
         identityZone.setConfig(definition);
 
         identityZone = validator.validate(identityZone, IdentityZoneValidator.Mode.MODIFY);
         provisioning.update(identityZone);
     }
 
+    public void setClientSecretPolicy(ClientSecretPolicy clientSecretPolicy) {
+        this.clientSecretPolicy = clientSecretPolicy;
+    }
 
+    public IdentityZoneConfigurationBootstrap setSamlKeys(Map<String, Map<String, String>> samlKeys) {
+        this.samlKeys = samlKeys;
+        return this;
+    }
+
+    public IdentityZoneConfigurationBootstrap setActiveKeyId(String activeKeyId) {
+        this.activeKeyId = activeKeyId;
+        return this;
+    }
 
     public void setTokenPolicy(TokenPolicy tokenPolicy) {
         this.tokenPolicy = tokenPolicy;
@@ -109,14 +154,14 @@ public class IdentityZoneConfigurationBootstrap implements InitializingBean {
     }
 
     public void setHomeRedirect(String homeRedirect) {
-        if ("null".equals(homeRedirect)) {
-            this.homeRedirect = null;
-        } else {
-            this.homeRedirect = homeRedirect;
-        }
+        this.homeRedirect = homeRedirect;
     }
 
-    public void setSelfServiceLinks(Map<String, String> links) {
+    public String getHomeRedirect() {
+        return homeRedirect;
+    }
+
+    public void setSelfServiceLinks(Map<String, Object> links) {
         this.selfServiceLinks = links;
     }
 
@@ -159,4 +204,25 @@ public class IdentityZoneConfigurationBootstrap implements InitializingBean {
     public void setIdpDiscoveryEnabled(boolean idpDiscoveryEnabled) {
         this.idpDiscoveryEnabled = idpDiscoveryEnabled;
     }
+
+    public boolean isAccountChooserEnabled() {
+        return accountChooserEnabled;
+    }
+
+    public void setAccountChooserEnabled(boolean accountChooserEnabled) {
+        this.accountChooserEnabled = accountChooserEnabled;
+    }
+
+    public void setBranding(Map<String, Object> branding) {
+        this.branding = branding;
+    }
+
+    public Map<String, Object> getBranding() {
+        return branding;
+    }
+
+    public void setDefaultUserGroups(Collection<String> defaultUserGroups) {
+        this.defaultUserGroups = defaultUserGroups;
+    }
+
 }

@@ -1,6 +1,6 @@
 /*******************************************************************************
  *     Cloud Foundry
- *     Copyright (c) [2009-2015] Pivotal Software, Inc. All Rights Reserved.
+ *     Copyright (c) [2009-2017] Pivotal Software, Inc. All Rights Reserved.
  *
  *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
  *     You may not use this product except in compliance with the License.
@@ -12,20 +12,24 @@
  *******************************************************************************/
 package org.cloudfoundry.identity.uaa.provider.saml.idp;
 
-import java.io.IOException;
-import java.io.StringReader;
-import java.net.MalformedURLException;
-import java.net.URL;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
+import java.io.IOException;
+import java.io.StringReader;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.Map;
 
-import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
-
-import com.fasterxml.jackson.annotation.JsonIgnore;
-
+@JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class SamlServiceProviderDefinition {
 
     public enum MetadataLocation {
@@ -38,24 +42,37 @@ public class SamlServiceProviderDefinition {
     private String nameID;
     private int singleSignOnServiceIndex;
     private boolean metadataTrustCheck;
+    private boolean skipSslValidation = false;
+    private Map<String, Object> attributeMappings = new HashMap<>();
+    private boolean enableIdpInitiatedSso = false;
+
 
     public SamlServiceProviderDefinition clone() {
         return new SamlServiceProviderDefinition(metaDataLocation,
-                                                  nameID,
-                                                  singleSignOnServiceIndex,
-                                                  metadataTrustCheck);
+                                                 nameID,
+                                                 singleSignOnServiceIndex,
+                                                 metadataTrustCheck,
+                                                 skipSslValidation,
+                                                 attributeMappings,
+                                                 enableIdpInitiatedSso);
     }
 
     public SamlServiceProviderDefinition() {}
 
-    public SamlServiceProviderDefinition(String metaDataLocation,
-                                          String nameID,
-                                          int singleSignOnServiceIndex,
-                                          boolean metadataTrustCheck) {
+    private SamlServiceProviderDefinition(String metaDataLocation,
+                                         String nameID,
+                                         int singleSignOnServiceIndex,
+                                         boolean metadataTrustCheck,
+                                         boolean skipSslValidation,
+                                         Map<String, Object> attributeMappings,
+                                         boolean enableIdpInitiatedSso) {
         this.metaDataLocation = metaDataLocation;
         this.nameID = nameID;
         this.singleSignOnServiceIndex = singleSignOnServiceIndex;
         this.metadataTrustCheck = metadataTrustCheck;
+        this.skipSslValidation = skipSslValidation;
+        this.attributeMappings = attributeMappings;
+        this.enableIdpInitiatedSso = enableIdpInitiatedSso;
     }
 
     @JsonIgnore
@@ -89,6 +106,7 @@ public class SamlServiceProviderDefinition {
         }
         try {
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setExpandEntityReferences(false);
             DocumentBuilder builder = factory.newDocumentBuilder();
             builder.parse(new InputSource(new StringReader(xml)));
         } catch (ParserConfigurationException e) {
@@ -134,48 +152,64 @@ public class SamlServiceProviderDefinition {
 
     @Override
     public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + ((metaDataLocation == null) ? 0 : metaDataLocation.hashCode());
-        result = prime * result + (metadataTrustCheck ? 1231 : 1237);
-        result = prime * result + ((nameID == null) ? 0 : nameID.hashCode());
-        result = prime * result + singleSignOnServiceIndex;
+        int result = metaDataLocation != null ? metaDataLocation.hashCode() : 0;
+        result = 31 * result + (nameID != null ? nameID.hashCode() : 0);
+        result = 31 * result + singleSignOnServiceIndex;
+        result = 31 * result + (metadataTrustCheck ? 1 : 0);
+        result = 31 * result + (skipSslValidation ? 1 : 0);
+        result = 31 * result + (attributeMappings != null ? attributeMappings.hashCode() : 0);
         return result;
     }
 
+    public boolean isSkipSslValidation() {
+        return skipSslValidation;
+    }
+
+    public void setSkipSslValidation(boolean skipSslValidation) {
+        this.skipSslValidation = skipSslValidation;
+    }
+
+    public void setAttributeMappings(Map<String, Object> attributeMappings) {
+        this.attributeMappings = attributeMappings;
+    }
+
+    public Map<String, Object> getAttributeMappings() {
+        return attributeMappings;
+    }
+
+    public boolean isEnableIdpInitiatedSso() {
+        return enableIdpInitiatedSso;
+    }
+
+    public void setEnableIdpInitiatedSso(boolean enableIdpInitiatedSso) {
+        this.enableIdpInitiatedSso = enableIdpInitiatedSso;
+    }
+
     @Override
-    public boolean equals(Object obj) {
-        if (this == obj)
-            return true;
-        if (obj == null)
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        SamlServiceProviderDefinition that = (SamlServiceProviderDefinition) o;
+
+        if (singleSignOnServiceIndex != that.singleSignOnServiceIndex) return false;
+        if (metadataTrustCheck != that.metadataTrustCheck) return false;
+        if (skipSslValidation != that.skipSslValidation) return false;
+        if (metaDataLocation != null ? !metaDataLocation.equals(that.metaDataLocation) : that.metaDataLocation != null)
             return false;
-        if (getClass() != obj.getClass())
-            return false;
-        SamlServiceProviderDefinition other = (SamlServiceProviderDefinition) obj;
-        if (metaDataLocation == null) {
-            if (other.metaDataLocation != null)
-                return false;
-        } else if (!metaDataLocation.equals(other.metaDataLocation))
-            return false;
-        if (metadataTrustCheck != other.metadataTrustCheck)
-            return false;
-        if (nameID == null) {
-            if (other.nameID != null)
-                return false;
-        } else if (!nameID.equals(other.nameID))
-            return false;
-        if (singleSignOnServiceIndex != other.singleSignOnServiceIndex)
-            return false;
-        return true;
+        if (nameID != null ? !nameID.equals(that.nameID) : that.nameID != null) return false;
+        return attributeMappings != null ? attributeMappings.equals(that.attributeMappings) : that.attributeMappings == null;
     }
 
     @Override
     public String toString() {
         return "SamlServiceProviderDefinition{" +
-            ", metaDataLocation='" + metaDataLocation + '\'' +
+            "metaDataLocation='" + metaDataLocation + '\'' +
             ", nameID='" + nameID + '\'' +
             ", singleSignOnServiceIndex=" + singleSignOnServiceIndex +
             ", metadataTrustCheck=" + metadataTrustCheck +
+            ", skipSslValidation=" + skipSslValidation +
+            ", attributeMappings=" + attributeMappings +
             '}';
     }
 
@@ -185,6 +219,7 @@ public class SamlServiceProviderDefinition {
         private String nameID;
         private int singleSignOnServiceIndex;
         private boolean metadataTrustCheck;
+        private boolean enableIdpInitiatedSso = false;
 
         private Builder(){}
 
@@ -198,6 +233,7 @@ public class SamlServiceProviderDefinition {
             def.setNameID(nameID);
             def.setSingleSignOnServiceIndex(singleSignOnServiceIndex);
             def.setMetadataTrustCheck(metadataTrustCheck);
+            def.setEnableIdpInitiatedSso(enableIdpInitiatedSso);
             return def;
         }
 
@@ -218,6 +254,11 @@ public class SamlServiceProviderDefinition {
 
         public Builder setMetadataTrustCheck(boolean metadataTrustCheck) {
             this.metadataTrustCheck = metadataTrustCheck;
+            return this;
+        }
+
+        public Builder setEnableIdpInitiatedSso(boolean enableIdpInitiatedSso) {
+            this.enableIdpInitiatedSso = enableIdpInitiatedSso;
             return this;
         }
     }

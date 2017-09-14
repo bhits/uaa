@@ -12,10 +12,6 @@
  *******************************************************************************/
 package org.cloudfoundry.identity.uaa.scim;
 
-import java.util.Arrays;
-import java.util.List;
-
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.cloudfoundry.identity.uaa.constants.OriginKeys;
@@ -31,18 +27,29 @@ public class ScimGroupMember<TEntity extends ScimCore> {
         this.entity = entity;
     }
 
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    public enum Role {
-        MEMBER, READER, WRITER;
+    public ScimGroupMember() {
     }
 
-    public static final List<Role> GROUP_MEMBER = Arrays.asList(Role.MEMBER);
-    public static final List<Role> GROUP_ADMIN = Arrays.asList(Role.READER, Role.WRITER);
+    public ScimGroupMember(String memberId) {
+        this(memberId, Type.USER);
+    }
+
+    public ScimGroupMember(TEntity entity) {
+        this(entity.getId(), getEntityType(entity));
+        setEntity(entity);
+    }
+
+    public ScimGroupMember(String memberId, Type type) {
+        this.memberId = memberId;
+        this.type = type;
+    }
 
     @JsonProperty("value")
     private String memberId;
 
     private String origin = OriginKeys.UAA;
+
+    private String operation;
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public enum Type {
@@ -52,17 +59,6 @@ public class ScimGroupMember<TEntity extends ScimCore> {
     private Type type;
 
     private TEntity entity;
-
-    @JsonIgnore
-    private List<Role> roles;
-
-    public List<Role> getRoles() {
-        return roles;
-    }
-
-    public void setRoles(List<Role> permissions) {
-        this.roles = permissions;
-    }
 
     public String getMemberId() {
         return memberId;
@@ -80,9 +76,17 @@ public class ScimGroupMember<TEntity extends ScimCore> {
         this.type = type;
     }
 
+    public String getOperation() {
+        return operation;
+    }
+
+    public void setOperation(String operation) {
+        this.operation = operation;
+    }
+
     @Override
     public String toString() {
-        return String.format("(memberId: %s, type: %s, roles: %s, origin:%s)", getMemberId(), getType(), getRoles(), getOrigin());
+        return String.format("(memberId: %s, type: %s, origin:%s)", getMemberId(), getType(), getOrigin());
     }
 
     public String getOrigin() {
@@ -115,28 +119,7 @@ public class ScimGroupMember<TEntity extends ScimCore> {
         return result;
     }
 
-    public ScimGroupMember() {
-    }
 
-    public ScimGroupMember(String memberId) {
-        this(memberId, Type.USER, GROUP_MEMBER);
-    }
-
-
-    public ScimGroupMember(String memberId, Type type, List<Role> roles) {
-        this.memberId = memberId;
-        this.type = type;
-        this.roles = roles;
-    }
-
-    public ScimGroupMember(TEntity entity) {
-        this(entity, GROUP_MEMBER);
-    }
-
-    public ScimGroupMember(TEntity entity, List<Role> roles) {
-        this(entity.getId(), getEntityType(entity), roles);
-        this.entity = entity;
-    }
 
     private static Type getEntityType(ScimCore entity) {
         Type type = null;

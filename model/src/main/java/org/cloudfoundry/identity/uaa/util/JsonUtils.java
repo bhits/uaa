@@ -19,6 +19,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
+import java.util.Date;
+import java.util.Map;
 
 
 public class JsonUtils {
@@ -128,6 +130,52 @@ public class JsonUtils {
             super(cause);
         }
 
+    }
+
+    public static String serializeExcludingProperties(Object object, String... propertiesToExclude) {
+        String serialized = JsonUtils.writeValueAsString(object);
+        Map<String, Object> properties = JsonUtils.readValue(serialized, new TypeReference<Map<String, Object>>() {});
+        for(String property : propertiesToExclude) {
+            if(property.contains(".")) {
+                String[] split = property.split("\\.", 2);
+                if(properties.containsKey(split[0])) {
+                    Object inner = properties.get(split[0]);
+                    properties.put(split[0], JsonUtils.readValue(serializeExcludingProperties(inner, split[1]), new TypeReference<Map<String, Object>>() {}));
+                }
+            } else {
+                properties.remove(property);
+            }
+        }
+        return JsonUtils.writeValueAsString(properties);
+    }
+
+    public static String getNodeAsString(JsonNode node, String fieldName, String defaultValue) {
+        JsonNode typeNode = node.get(fieldName);
+        return typeNode == null ? defaultValue : typeNode.asText(defaultValue);
+    }
+
+    public static int getNodeAsInt(JsonNode node, String fieldName, int defaultValue) {
+        JsonNode typeNode = node.get(fieldName);
+        return typeNode == null ? defaultValue : typeNode.asInt(defaultValue);
+    }
+
+    public static boolean getNodeAsBoolean(JsonNode node, String fieldName, boolean defaultValue) {
+        JsonNode typeNode = node.get(fieldName);
+        return typeNode == null ? defaultValue : typeNode.asBoolean(defaultValue);
+    }
+
+    public static Date getNodeAsDate(JsonNode node, String fieldName) {
+        JsonNode typeNode = node.get(fieldName);
+        long date = typeNode == null ? -1 : typeNode.asLong(-1);
+        if (date==-1) {
+            return null;
+        } else {
+            return new Date(date);
+        }
+    }
+
+    public static Map<String,Object> getNodeAsMap(JsonNode node) {
+        return objectMapper.convertValue(node, Map.class);
     }
 
 }

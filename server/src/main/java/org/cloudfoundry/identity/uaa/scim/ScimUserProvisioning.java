@@ -1,5 +1,5 @@
 /*******************************************************************************
- *     Cloud Foundry 
+ *     Cloud Foundry
  *     Copyright (c) [2009-2016] Pivotal Software, Inc. All Rights Reserved.
  *
  *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
@@ -18,22 +18,21 @@ import org.cloudfoundry.identity.uaa.scim.exception.InvalidPasswordException;
 import org.cloudfoundry.identity.uaa.scim.exception.InvalidScimResourceException;
 import org.cloudfoundry.identity.uaa.scim.exception.ScimResourceNotFoundException;
 
-/**
- * @author Luke Taylor
- * @author Dave Syer
- */
+
 public interface ScimUserProvisioning extends ResourceManager<ScimUser>, Queryable<ScimUser> {
 
-    public ScimUser createUser(ScimUser user, String password) throws InvalidPasswordException,
-        InvalidScimResourceException;
+    ScimUser createUser(ScimUser user, String password, String zoneId) throws InvalidPasswordException, InvalidScimResourceException;
 
-    public void changePassword(String id, String oldPassword, String newPassword)
-        throws ScimResourceNotFoundException;
+    void changePassword(String id, String oldPassword, String newPassword, String zoneId) throws ScimResourceNotFoundException;
 
-    public ScimUser verifyUser(String id, int version) throws ScimResourceNotFoundException,
-        InvalidScimResourceException;
+    void updatePasswordChangeRequired(String userId, boolean passwordChangeRequired, String zoneId) throws ScimResourceNotFoundException;
 
-    public boolean checkPasswordMatches(String id, String password) throws ScimResourceNotFoundException;
+    ScimUser verifyUser(String id, int version, String zoneId) throws ScimResourceNotFoundException, InvalidScimResourceException;
 
+    boolean checkPasswordMatches(String id, String password, String zoneId) throws ScimResourceNotFoundException;
+
+    boolean checkPasswordChangeIndividuallyRequired(String id, String zoneId) throws ScimResourceNotFoundException;
+
+    void updateLastLogonTime(String id, String zoneId);
 }
 

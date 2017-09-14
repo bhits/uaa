@@ -1,5 +1,5 @@
 /*******************************************************************************
- *     Cloud Foundry 
+ *     Cloud Foundry
  *     Copyright (c) [2009-2016] Pivotal Software, Inc. All Rights Reserved.
  *
  *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
@@ -13,14 +13,8 @@
 
 package org.cloudfoundry.identity.uaa.oauth;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-
-import java.util.Arrays;
-import java.util.Collections;
-
-import org.cloudfoundry.identity.uaa.oauth.client.ClientConstants;
 import org.cloudfoundry.identity.uaa.user.UaaUserApprovalHandler;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -28,18 +22,23 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.authority.AuthorityUtils;
 import org.springframework.security.oauth2.provider.AuthorizationRequest;
 import org.springframework.security.oauth2.provider.client.BaseClientDetails;
-import org.springframework.security.oauth2.provider.ClientDetailsService;
 import org.springframework.security.oauth2.provider.token.AuthorizationServerTokenServices;
+
+import java.util.Arrays;
+
+import static java.util.Collections.singleton;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * @author Dave Syer
- * 
+ *
  */
 public class UaaUserApprovalHandlerTests {
 
     private UaaUserApprovalHandler handler = new UaaUserApprovalHandler();
 
-    private ClientDetailsService clientDetailsService = Mockito.mock(ClientDetailsService.class);
+    private ClientServicesExtension clientDetailsService = Mockito.mock(ClientServicesExtension.class);
 
     private AuthorizationServerTokenServices tokenServices = Mockito.mock(AuthorizationServerTokenServices.class);
 
@@ -47,7 +46,7 @@ public class UaaUserApprovalHandlerTests {
 
     private Authentication userAuthentication = new UsernamePasswordAuthenticationToken("joe", "", AuthorityUtils.commaSeparatedStringToAuthorityList("USER"));
 
-    {
+    public UaaUserApprovalHandlerTests() {
         handler.setClientDetailsService(clientDetailsService);
         handler.setTokenServices(tokenServices);
     }
@@ -64,7 +63,7 @@ public class UaaUserApprovalHandlerTests {
     public void testAutoApproveAll() {
         BaseClientDetails client = new BaseClientDetails("client", "none", "read,write", "authorization_code",
                         "uaa.none");
-        client.setAdditionalInformation(Collections.singletonMap(ClientConstants.AUTO_APPROVE, true));
+        client.setAutoApproveScopes(singleton("true"));
             Mockito.when(clientDetailsService.loadClientByClientId("client")).thenReturn(client);
         assertTrue(handler.isApproved(authorizationRequest, userAuthentication));
     }
@@ -74,10 +73,11 @@ public class UaaUserApprovalHandlerTests {
         BaseClientDetails client = new BaseClientDetails("client", "none", "read,write", "authorization_code",
                         "uaa.none");
         Mockito.when(clientDetailsService.loadClientByClientId("client")).thenReturn(client);
-        client.setAdditionalInformation(Collections.singletonMap(ClientConstants.AUTO_APPROVE, Collections.singleton("read")));
+        client.setAutoApproveScopes(singleton("read"));
         assertTrue(handler.isApproved(authorizationRequest, userAuthentication));
-        client.setAdditionalInformation(Collections.singletonMap(ClientConstants.AUTO_APPROVE, Collections.singleton("write")));
+        client.setAutoApproveScopes(singleton("write"));
         assertFalse(handler.isApproved(authorizationRequest, userAuthentication));
     }
+
 
 }

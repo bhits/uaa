@@ -16,14 +16,16 @@ package org.cloudfoundry.identity.uaa.authentication.manager;
 
 import org.cloudfoundry.identity.uaa.authentication.UaaAuthentication;
 import org.cloudfoundry.identity.uaa.constants.OriginKeys;
+import org.cloudfoundry.identity.uaa.provider.IdentityProvider;
+import org.cloudfoundry.identity.uaa.provider.IdentityProviderProvisioning;
 import org.cloudfoundry.identity.uaa.provider.LdapIdentityProviderDefinition;
 import org.cloudfoundry.identity.uaa.provider.ldap.extension.ExtendedLdapUserImpl;
+import org.cloudfoundry.identity.uaa.provider.ldap.extension.LdapAuthority;
 import org.cloudfoundry.identity.uaa.user.UaaAuthority;
 import org.cloudfoundry.identity.uaa.user.UaaUser;
 import org.cloudfoundry.identity.uaa.user.UaaUserDatabase;
 import org.cloudfoundry.identity.uaa.user.UaaUserPrototype;
-import org.cloudfoundry.identity.uaa.provider.IdentityProvider;
-import org.cloudfoundry.identity.uaa.provider.IdentityProviderProvisioning;
+import org.cloudfoundry.identity.uaa.user.UserInfo;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.junit.Before;
 import org.junit.Test;
@@ -35,19 +37,23 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.ldap.userdetails.LdapUserDetails;
 
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
+import static java.util.Collections.EMPTY_LIST;
 import static org.cloudfoundry.identity.uaa.provider.ExternalIdentityProviderDefinition.USER_ATTRIBUTE_PREFIX;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -106,10 +112,10 @@ public class LdapLoginAuthenticationManagerTests {
     IdentityProvider provider;
     LdapIdentityProviderDefinition definition;
 
-
     @Before
     public void setUp() {
-        am = new LdapLoginAuthenticationManager();
+        provisioning = mock(IdentityProviderProvisioning.class);
+        am = new LdapLoginAuthenticationManager(provisioning);
         publisher = mock(ApplicationEventPublisher.class);
         am.setApplicationEventPublisher(publisher);
         am.setOrigin(origin);
@@ -123,7 +129,7 @@ public class LdapLoginAuthenticationManagerTests {
         when(auth.getAuthorities()).thenReturn(null);
 
         provider = mock(IdentityProvider.class);
-        provisioning = mock(IdentityProviderProvisioning.class);
+
         when(provisioning.retrieveByOrigin(anyString(),anyString())).thenReturn(provider);
         Map attributeMappings = new HashMap<>();
         definition = LdapIdentityProviderDefinition.searchAndBindMapGroupToScopes(
@@ -145,12 +151,11 @@ public class LdapLoginAuthenticationManagerTests {
         definition.addAttributeMapping(USER_ATTRIBUTE_PREFIX+MANAGERS, UAA_MANAGER);
         definition.addAttributeMapping(USER_ATTRIBUTE_PREFIX+COST_CENTERS, COST_CENTER);
         when(provider.getConfig()).thenReturn(definition);
-        am.setProvisioning(provisioning);
     }
 
     @Test
     public void testGetUserWithExtendedLdapInfo() throws Exception {
-        UaaUser user = am.getUser(auth);
+        UaaUser user = am.getUser(auth, null);
         assertEquals(DN, user.getExternalId());
         assertEquals(LDAP_EMAIL, user.getEmail());
         assertEquals(origin, user.getOrigin());
@@ -161,7 +166,7 @@ public class LdapLoginAuthenticationManagerTests {
         UserDetails mockNonLdapUserDetails = mockNonLdapUserDetails();
         when(mockNonLdapUserDetails.getUsername()).thenReturn(TEST_EMAIL);
         when(auth.getPrincipal()).thenReturn(mockNonLdapUserDetails);
-        UaaUser user = am.getUser(auth);
+        UaaUser user = am.getUser(auth, null);
         assertEquals(TEST_EMAIL, user.getExternalId());
         assertEquals(TEST_EMAIL, user.getEmail());
         assertEquals(origin, user.getOrigin());
@@ -172,7 +177,7 @@ public class LdapLoginAuthenticationManagerTests {
 
 
         UaaUser user = getUaaUser();
-        UaaUser userFromRequest = am.getUser(auth);
+        UaaUser userFromRequest = am.getUser(auth, null);
         definition.setAutoAddGroups(true);
         UaaUser result = am.userAuthenticated(auth, user, userFromRequest);
         assertSame(dbUser, result);
@@ -185,12 +190,18 @@ public class LdapLoginAuthenticationManagerTests {
     }
 
     @Test
+    public void shadowUserCreationDisabledWillNotAddShadowUser() throws Exception {
+        definition.setAddShadowUserOnLogin(false);
+        assertFalse(am.isAddNewShadowUser());
+    }
+
+    @Test
     public void update_existingUser_if_attributes_different() throws Exception {
         ExtendedLdapUserImpl authDetails = getAuthDetails(LDAP_EMAIL, "MarissaChanged", "BloggsChanged", "8675309");
         when(auth.getPrincipal()).thenReturn(authDetails);
 
         UaaUser user = getUaaUser();
-        UaaUser userFromRequest = am.getUser(auth);
+        UaaUser userFromRequest = am.getUser(auth, null);
         am.userAuthenticated(auth, userFromRequest, user);
         ArgumentCaptor<ExternalGroupAuthorizationEvent> captor = ArgumentCaptor.forClass(ExternalGroupAuthorizationEvent.class);
         verify(publisher, times(1)).publishEvent(captor.capture());
@@ -206,7 +217,7 @@ public class LdapLoginAuthenticationManagerTests {
         ExtendedLdapUserImpl authDetails = getAuthDetails(user.getEmail(), user.getGivenName(), user.getFamilyName(), user.getPhoneNumber());
         when(auth.getPrincipal()).thenReturn(authDetails);
 
-        UaaUser userFromRequest = am.getUser(auth);
+        UaaUser userFromRequest = am.getUser(auth, null);
         am.userAuthenticated(auth, userFromRequest, user);
         ArgumentCaptor<ExternalGroupAuthorizationEvent> captor = ArgumentCaptor.forClass(ExternalGroupAuthorizationEvent.class);
         verify(publisher, times(1)).publishEvent(captor.capture());
@@ -215,7 +226,78 @@ public class LdapLoginAuthenticationManagerTests {
     }
 
     @Test
-    public void test_custom_user_attributes() throws Exception {
+    public void test_authentication_attributes() throws Exception {
+        test_authentication_attributes(false);
+    }
+
+    @Test
+    public void test_authentication_attributes_store_custom_attributes() throws Exception {
+        test_authentication_attributes(true);
+    }
+
+    @Test
+    public void test_group_white_list_with_wildcard() {
+        UaaUser user = getUaaUser();
+        ExtendedLdapUserImpl authDetails =
+            getAuthDetails(
+                user.getEmail(),
+                user.getGivenName(),
+                user.getFamilyName(),
+                user.getPhoneNumber(),
+                new AttributeInfo(UAA_MANAGER, new String[] {KARI_THE_ANT_EATER, JOHN_THE_SLOTH}),
+                new AttributeInfo(COST_CENTER, new String[] {DENVER_CO})
+            );
+        Map<String, String[]> role1 = new HashMap<>();
+        role1.put("cn", new String[] {"ldap.role.1.a", "ldap.role.1.b", "ldap.role.1"});
+        Map<String, String[]> role2 = new HashMap<>();
+        role2.put("cn", new String[] {"ldap.role.2.a", "ldap.role.2.b", "ldap.role.2"});
+        authDetails.setAuthorities(
+            Arrays.asList(
+                new LdapAuthority("role1", "cn=role1,ou=test,ou=com", role1),
+                new LdapAuthority("role2", "cn=role2,ou=test,ou=com", role2)
+
+            )
+        );
+
+
+        definition.setExternalGroupsWhitelist(EMPTY_LIST);
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder()
+        );
+
+        definition.setExternalGroupsWhitelist(null);
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder()
+        );
+
+        definition.setExternalGroupsWhitelist(Arrays.asList("ldap.role.1.a"));
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder("ldap.role.1.a")
+        );
+
+        definition.setExternalGroupsWhitelist(Arrays.asList("ldap.role.1.a", "ldap.role.2.*"));
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder("ldap.role.1.a", "ldap.role.2.a", "ldap.role.2.b")
+        );
+
+
+        definition.setExternalGroupsWhitelist(Arrays.asList("ldap.role.*.*"));
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder("ldap.role.1.a", "ldap.role.1.b", "ldap.role.2.a", "ldap.role.2.b")
+        );
+
+        definition.setExternalGroupsWhitelist(Arrays.asList("ldap.role.*.*", "ldap.role.*"));
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder("ldap.role.1.a", "ldap.role.1.b", "ldap.role.1", "ldap.role.2.a", "ldap.role.2.b", "ldap.role.2")
+        );
+
+        definition.setExternalGroupsWhitelist(Arrays.asList("ldap*"));
+        assertThat(am.getExternalUserAuthorities(authDetails),
+                   containsInAnyOrder("ldap.role.1.a", "ldap.role.1.b", "ldap.role.1", "ldap.role.2.a", "ldap.role.2.b", "ldap.role.2")
+        );
+    }
+
+    public void test_authentication_attributes(boolean storeUserInfo) throws Exception {
 
         UaaUser user = getUaaUser();
         ExtendedLdapUserImpl authDetails =
@@ -227,6 +309,19 @@ public class LdapLoginAuthenticationManagerTests {
                 new AttributeInfo(UAA_MANAGER, new String[] {KARI_THE_ANT_EATER, JOHN_THE_SLOTH}),
                 new AttributeInfo(COST_CENTER, new String[] {DENVER_CO})
             );
+
+        Map<String, String[]> role1 = new HashMap<>();
+        role1.put("cn", new String[] {"ldap.role.1.a", "ldap.role.1.b", "ldap.role.1"});
+        Map<String, String[]> role2 = new HashMap<>();
+        role2.put("cn", new String[] {"ldap.role.2.a", "ldap.role.2.b", "ldap.role.2"});
+        authDetails.setAuthorities(
+            Arrays.asList(
+                new LdapAuthority("role1", "cn=role1,ou=test,ou=com", role1),
+                new LdapAuthority("role2", "cn=role2,ou=test,ou=com", role2)
+
+            )
+        );
+        definition.setExternalGroupsWhitelist(Arrays.asList("*"));
         when(auth.getPrincipal()).thenReturn(authDetails);
 
         UaaUserDatabase db = mock(UaaUserDatabase.class);
@@ -235,7 +330,19 @@ public class LdapLoginAuthenticationManagerTests {
         am.setOrigin(OriginKeys.LDAP);
         am.setUserDatabase(db);
 
+
+            //set the config flag
+        definition.setStoreCustomAttributes(storeUserInfo);
+
         UaaAuthentication authentication = (UaaAuthentication)am.authenticate(auth);
+        UserInfo info = new UserInfo()
+            .setUserAttributes(authentication.getUserAttributes())
+            .setRoles(Arrays.asList("ldap.role.1.a", "ldap.role.1.b", "ldap.role.1", "ldap.role.2.a", "ldap.role.2.b", "ldap.role.2"));
+        if (storeUserInfo) {
+            verify(db, times(1)).storeUserInfo(anyString(), eq(info));
+        } else {
+            verify(db, never()).storeUserInfo(anyString(), eq(info));
+        }
 
         assertEquals("Expected two user attributes", 2, authentication.getUserAttributes().size());
         assertNotNull("Expected cost center attribute", authentication.getUserAttributes().get(COST_CENTERS));
@@ -244,6 +351,9 @@ public class LdapLoginAuthenticationManagerTests {
         assertNotNull("Expected manager attribute", authentication.getUserAttributes().get(MANAGERS));
         assertEquals("Expected 2 manager attribute values", 2, authentication.getUserAttributes().get(MANAGERS).size());
         assertThat(authentication.getUserAttributes().get(MANAGERS), containsInAnyOrder(JOHN_THE_SLOTH, KARI_THE_ANT_EATER));
+
+        assertThat(authentication.getAuthenticationMethods(), containsInAnyOrder("ext", "pwd"));
+
 
     }
 

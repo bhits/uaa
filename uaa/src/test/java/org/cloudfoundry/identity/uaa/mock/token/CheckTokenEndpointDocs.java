@@ -1,10 +1,20 @@
+/*******************************************************************************
+ *     Cloud Foundry
+ *     Copyright (c) [2009-2016] Pivotal Software, Inc. All Rights Reserved.
+ *
+ *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
+ *     You may not use this product except in compliance with the License.
+ *
+ *     This product includes a number of subcomponents with
+ *     separate copyright notices and license terms. Your use of these
+ *     subcomponents is subject to the terms and conditions of the
+ *     subcomponent's license, as noted in the LICENSE file.
+ *******************************************************************************/
 package org.cloudfoundry.identity.uaa.mock.token;
 
 import org.apache.commons.ssl.Base64;
 import org.cloudfoundry.identity.uaa.mock.InjectedMockContextTest;
-import org.cloudfoundry.identity.uaa.test.TestClient;
 import org.cloudfoundry.identity.uaa.test.UaaTestAccounts;
-import org.junit.Before;
 import org.junit.Test;
 import org.springframework.restdocs.snippet.Snippet;
 
@@ -15,9 +25,7 @@ import static org.springframework.restdocs.mockmvc.MockMvcRestDocumentation.docu
 import static org.springframework.restdocs.mockmvc.RestDocumentationRequestBuilders.post;
 import static org.springframework.restdocs.operation.preprocess.Preprocessors.preprocessResponse;
 import static org.springframework.restdocs.operation.preprocess.Preprocessors.prettyPrint;
-import static org.springframework.restdocs.payload.JsonFieldType.ARRAY;
-import static org.springframework.restdocs.payload.JsonFieldType.NUMBER;
-import static org.springframework.restdocs.payload.JsonFieldType.STRING;
+import static org.springframework.restdocs.payload.JsonFieldType.*;
 import static org.springframework.restdocs.payload.PayloadDocumentation.fieldWithPath;
 import static org.springframework.restdocs.payload.PayloadDocumentation.responseFields;
 import static org.springframework.restdocs.request.RequestDocumentation.parameterWithName;
@@ -26,14 +34,6 @@ import static org.springframework.restdocs.snippet.Attributes.key;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 public class CheckTokenEndpointDocs extends InjectedMockContextTest {
-    private TestClient testClient;
-
-    @Before
-    public void setUp() throws Exception {
-        if (testClient == null) {
-            testClient = new TestClient(getMockMvc());
-        }
-    }
 
     @Test
     public void checkToken() throws Exception {
@@ -52,7 +52,7 @@ public class CheckTokenEndpointDocs extends InjectedMockContextTest {
 
         Snippet requestParameters = requestParameters(
             parameterWithName("token").description("The token").attributes(key("constraints").value("Required"), key("type").value(STRING)),
-            parameterWithName("scopes").description("Comma-separated string of scopes to check if scopes are present on the token").attributes(key("constraints").value("Optional"), key("type").value(ARRAY))
+            parameterWithName("scopes").description("String of comma-separated scopes, for checking presence of scopes on the token").attributes(key("constraints").value("Optional"), key("type").value(ARRAY))
         );
 
         Snippet responseFields = responseFields(
@@ -62,7 +62,7 @@ public class CheckTokenEndpointDocs extends InjectedMockContextTest {
             fieldWithPath("client_id").description("A unique string representing the registration information provided by the client"),
             fieldWithPath("exp").description("[Expiration Time](https://tools.ietf.org/html/rfc7519#section-4.1.4) Claim"),
             fieldWithPath("authorities").type(ARRAY).description("Only applicable for client tokens").optional(),
-            fieldWithPath("scope").description("Comma-delimited list of scopes authorized by the user for this client"),
+            fieldWithPath("scope").description("List of scopes authorized by the user for this client"),
             fieldWithPath("jti").description("[JWT ID](https://tools.ietf.org/html/rfc7519#section-4.1.7) Claim"),
             fieldWithPath("aud").description("[Audience](https://tools.ietf.org/html/rfc7519#section-4.1.3) Claim"),
             fieldWithPath("sub").description("[Subject](https://tools.ietf.org/html/rfc7519#section-4.1.2) Claim"),
@@ -75,7 +75,7 @@ public class CheckTokenEndpointDocs extends InjectedMockContextTest {
             fieldWithPath("zid").description("Zone ID"),
             fieldWithPath("rev_sig").description("Revocation Signature - token revocation hash salted with at least client ID and client secret, and optionally various user values."),
             fieldWithPath("origin").type(STRING).description("Only applicable for user tokens").optional(),
-            fieldWithPath("revocable").type(STRING).description("Set to true if this token is revocable").optional()
+            fieldWithPath("revocable").type(BOOLEAN).description("Set to true if this token is revocable").optional()
         );
 
         getMockMvc().perform(post("/check_token")

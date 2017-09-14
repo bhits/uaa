@@ -17,9 +17,16 @@ package org.cloudfoundry.identity.uaa.util;
 import org.apache.commons.codec.binary.Base64;
 import org.cloudfoundry.identity.uaa.oauth.client.ClientConstants;
 import org.cloudfoundry.identity.uaa.user.UaaUser;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.jwt.crypto.sign.Signer;
 import org.springframework.security.oauth2.provider.ClientDetails;
+import org.springframework.web.util.UriComponentsBuilder;
 
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -27,12 +34,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
+import static java.util.Collections.emptySet;
+import static java.util.Optional.ofNullable;
 import static org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants.CID;
 import static org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants.GRANT_TYPE;
 import static org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants.SUB;
+import static org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants.USER_ID;
+import static org.springframework.util.StringUtils.hasText;
 
 public final class UaaTokenUtils {
+
+    public static final Pattern jwtPattern = Pattern.compile("[a-zA-Z0-9_\\-\\\\=]*\\.[a-zA-Z0-9_\\-\\\\=]*\\.[a-zA-Z0-9_\\-\\\\=]*");
 
     private UaaTokenUtils() { }
 
@@ -106,6 +120,13 @@ public final class UaaTokenUtils {
 
     public static Set<String> retainAutoApprovedScopes(Collection<String> requestedScopes, Set<String> autoApprovedScopes) {
         HashSet<String> result = new HashSet<>();
+        if(autoApprovedScopes == null){
+            return result;
+        }
+        if (autoApprovedScopes.contains("true")) {
+            result.addAll(requestedScopes);
+            return result;
+        }
         Set<Pattern> autoApprovedScopePatterns = UaaStringUtils.constructWildcards(autoApprovedScopes);
         // Don't want to approve more than what's requested
         for (String scope : requestedScopes) {
@@ -117,13 +138,24 @@ public final class UaaTokenUtils {
     }
 
     public static boolean isUserToken(Map<String, Object> claims) {
-        return !"client_credentials".equals(claims.get(GRANT_TYPE)) || (claims.get(SUB)!=null && claims.get(SUB) == claims.get(CID));
+        if (claims.get(GRANT_TYPE)!=null) {
+            return !"client_credentials".equals(claims.get(GRANT_TYPE));
+        }
+        if (claims.get(SUB)!=null) {
+            if (claims.get(SUB).equals(claims.get(USER_ID))) {
+                return true;
+            } else if (claims.get(SUB).equals(claims.get(CID))) {
+                return false;
+            }
+        }
+        //err on the side of caution
+        return true;
     }
 
-    public static String getRevocableTokenSignature(ClientDetails client, UaaUser user) {
+    public static String getRevocableTokenSignature(ClientDetails client, String clientSecret, UaaUser user) {
         String[] salts = new String[] {
             client.getClientId(),
-            client.getClientSecret(),
+            clientSecret,
             (String)client.getAdditionalInformation().get(ClientConstants.TOKEN_SALT),
             user == null ? null : user.getId(),
             user == null ? null : user.getPassword(),
@@ -152,5 +184,39 @@ public final class UaaTokenUtils {
         String signatureBase64 = Base64.encodeBase64URLSafeString(signature);
 
         return headerAndClaims + "." + signatureBase64;
+    }
+
+    public static boolean isJwtToken(String token) {
+        return jwtPattern.matcher(token).matches();
+    }
+
+    public static String constructTokenEndpointUrl(String issuer) throws URISyntaxException {
+        try {
+            new URL(issuer);
+        } catch (MalformedURLException x) {
+            throw new URISyntaxException(issuer, x.getMessage());
+        }
+        URI uri = new URI(issuer);
+        String hostToUse = uri.getHost();
+        if (hasText(IdentityZoneHolder.get().getSubdomain())) {
+            hostToUse = IdentityZoneHolder.get().getSubdomain() + "." + hostToUse;
+        }
+        return UriComponentsBuilder.fromUriString(issuer).host(hostToUse).pathSegment("oauth/token").build().toUriString();
+    }
+
+
+
+    public static boolean hasRequiredUserAuthorities(Collection<String> requiredGroups, Collection<? extends GrantedAuthority> userGroups) {
+        return hasRequiredUserGroups(requiredGroups,
+                                     ofNullable(userGroups).orElse(emptySet())
+                                        .stream()
+                                        .map(GrantedAuthority::getAuthority)
+                                        .collect(Collectors.toList())
+        );
+    }
+
+    public static boolean hasRequiredUserGroups(Collection<String> requiredGroups, Collection<String> userGroups) {
+        return ofNullable(userGroups).orElse(emptySet())
+            .containsAll(ofNullable(requiredGroups).orElse(emptySet()));
     }
 }

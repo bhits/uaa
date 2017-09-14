@@ -1,5 +1,5 @@
 /*******************************************************************************
- *     Cloud Foundry 
+ *     Cloud Foundry
  *     Copyright (c) [2009-2016] Pivotal Software, Inc. All Rights Reserved.
  *
  *     This product is licensed to you under the Apache License, Version 2.0 (the "License").
@@ -50,20 +50,24 @@ import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.Map;
 
+import static org.cloudfoundry.identity.uaa.constants.OriginKeys.LOGIN_SERVER;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 /**
  * Integration test to verify that the Login Server authentication channel is
  * open and working.
- * 
+ *
  * @author Dave Syer
  */
 public class LoginServerSecurityIntegrationTests {
 
     private final String JOE = "joe" + new RandomValueStringGenerator().generate().toLowerCase();
+    private final String LOGIN_SERVER_JOE = "ls_joe" + new RandomValueStringGenerator().generate().toLowerCase();
 
     private final String userEndpoint = "/Users";
 
@@ -83,6 +87,7 @@ public class LoginServerSecurityIntegrationTests {
     private MultiValueMap<String, String> params = new LinkedMultiValueMap<String, String>();
 
     private HttpHeaders headers = new HttpHeaders();
+    private ScimUser userForLoginServer;
 
     @Before
     public void init() {
@@ -119,13 +124,24 @@ public class LoginServerSecurityIntegrationTests {
         RestOperations client = serverRunning.getRestTemplate();
 
         ScimUser user = new ScimUser();
+        user.setPassword("password");
         user.setUserName(JOE);
         user.setName(new ScimUser.Name("Joe", "User"));
         user.addEmail("joe@blah.com");
         user.setVerified(true);
 
+        userForLoginServer = new ScimUser();
+        userForLoginServer.setPassword("password");
+        userForLoginServer.setUserName(LOGIN_SERVER_JOE);
+        userForLoginServer.setName(new ScimUser.Name("Joe_login_server", "User"));
+        userForLoginServer.addEmail("joe_ls@blah.com");
+        userForLoginServer.setVerified(true);
+        userForLoginServer.setOrigin(LOGIN_SERVER);
+
         ResponseEntity<ScimUser> newuser = client.postForEntity(serverRunning.getUrl(userEndpoint), user,
                         ScimUser.class);
+        userForLoginServer = client.postForEntity(serverRunning.getUrl(userEndpoint), userForLoginServer,
+                ScimUser.class).getBody();
 
         joe = newuser.getBody();
         assertEquals(JOE, joe.getUserName());
@@ -196,7 +212,8 @@ public class LoginServerSecurityIntegrationTests {
     public void testLoginServerCanAuthenticateUserForCf() throws Exception {
         ImplicitResourceDetails resource = testAccounts.getDefaultImplicitResource();
         params.set("client_id", resource.getClientId());
-        params.set(OriginKeys.ORIGIN, joe.getOrigin());
+        params.set("username", userForLoginServer.getUserName());
+        params.set(OriginKeys.ORIGIN, userForLoginServer.getOrigin());
         params.set(UaaAuthenticationDetails.ADD_NEW, "false");
         String redirect = resource.getPreEstablishedRedirectUri();
         if (redirect != null) {
@@ -214,7 +231,8 @@ public class LoginServerSecurityIntegrationTests {
     public void testLoginServerCanAuthenticateUserForAuthorizationCode() throws Exception {
         params.set("client_id", testAccounts.getDefaultAuthorizationCodeResource().getClientId());
         params.set("response_type", "code");
-        params.set(OriginKeys.ORIGIN, joe.getOrigin());
+        params.set("username", userForLoginServer.getUserName());
+        params.set(OriginKeys.ORIGIN, userForLoginServer.getOrigin());
         params.set(UaaAuthenticationDetails.ADD_NEW, "false");
         @SuppressWarnings("rawtypes")
         ResponseEntity<Map> response = serverRunning.postForMap(serverRunning.getAuthorizationUri(), params, headers);
@@ -229,7 +247,7 @@ public class LoginServerSecurityIntegrationTests {
     public void testLoginServerCanAuthenticateUserWithIDForAuthorizationCode() throws Exception {
         params.set("client_id", testAccounts.getDefaultAuthorizationCodeResource().getClientId());
         params.set("response_type", "code");
-        params.set("user_id", joe.getId());
+        params.set("user_id", userForLoginServer.getId());
         params.set(UaaAuthenticationDetails.ADD_NEW, "false");
         @SuppressWarnings("rawtypes")
         ResponseEntity<Map> response = serverRunning.postForMap(serverRunning.getAuthorizationUri(), params, headers);
@@ -321,6 +339,30 @@ public class LoginServerSecurityIntegrationTests {
 
     @Test
     @OAuth2ContextConfiguration(LoginClient.class)
+    public void testAddNewUserWithWrongEmailFormat() throws Exception {
+        ((RestTemplate) serverRunning.getRestTemplate())
+                        .setRequestFactory(new HttpComponentsClientHttpRequestFactory());
+        params.set("client_id", testAccounts.getDefaultImplicitResource().getClientId());
+        params.set("source","login");
+        params.set("username", "newuser");
+        params.remove("given_name");
+        params.remove("family_name");
+        params.set("email", "noAtSign");
+        params.set(UaaAuthenticationDetails.ADD_NEW, "true");
+        @SuppressWarnings("rawtypes")
+        ResponseEntity<Map> response = serverRunning.postForMap(serverRunning.getAuthorizationUri(), params, headers);
+        assertNotNull(response);
+        assertNotEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
+        assertEquals(HttpStatus.FOUND, response.getStatusCode());
+        @SuppressWarnings("unchecked")
+        Map<String, String> results = response.getBody();
+        if (results != null) {
+            assertFalse("There should not be an error: " + results, results.containsKey("error"));
+        }
+    }
+
+    @Test
+    @OAuth2ContextConfiguration(LoginClient.class)
     public void testLoginServerCfPasswordToken() throws Exception {
         ImplicitResourceDetails resource = testAccounts.getDefaultImplicitResource();
         HttpHeaders headers = new HttpHeaders();
@@ -328,7 +370,8 @@ public class LoginServerSecurityIntegrationTests {
         params.set("client_id", resource.getClientId());
         params.set("client_secret","");
         params.set("source","login");
-        params.set(OriginKeys.ORIGIN, joe.getOrigin());
+        params.set("username", userForLoginServer.getUserName());
+        params.set(OriginKeys.ORIGIN, userForLoginServer.getOrigin());
         params.set(UaaAuthenticationDetails.ADD_NEW, "false");
         params.set("grant_type", "password");
         String redirect = resource.getPreEstablishedRedirectUri();
@@ -375,7 +418,7 @@ public class LoginServerSecurityIntegrationTests {
         params.set("source","login");
         params.set(UaaAuthenticationDetails.ADD_NEW, "false");
         params.set("grant_type", "password");
-        
+
         String redirect = resource.getPreEstablishedRedirectUri();
         if (redirect != null) {
             params.set("redirect_uri", redirect);
@@ -405,7 +448,7 @@ public class LoginServerSecurityIntegrationTests {
         @SuppressWarnings("rawtypes")
         ResponseEntity<Map> response = serverRunning.postForMap(serverRunning.getAccessTokenUri(), params, headers);
         HttpStatus statusCode = response.getStatusCode();
-        
+
         assertTrue("Status code should be 401 or 403.", statusCode==HttpStatus.FORBIDDEN || statusCode==HttpStatus.UNAUTHORIZED);
     }
 
@@ -415,7 +458,7 @@ public class LoginServerSecurityIntegrationTests {
         String authHeader = "Basic " + new String( encodedAuth );
         return authHeader;
     }
-        
+
 
     private static class LoginClient extends ClientCredentialsResourceDetails {
         @SuppressWarnings("unused")

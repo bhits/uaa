@@ -1,4 +1,9 @@
+<link href="https://raw.github.com/clownfart/Markdown-CSS/master/markdown.css" rel="stylesheet"></link>
+
 # CloudFoundry User Account and Authentication (UAA) Server
+
+[![Build Status](https://travis-ci.org/cloudfoundry/uaa.svg?branch=develop)](https://travis-ci.org/cloudfoundry/uaa)
+[![Coverage Status](https://coveralls.io/repos/cloudfoundry/uaa/badge.png?branch=develop)](https://coveralls.io/r/cloudfoundry/uaa?branch=develop)
 
 The UAA is a multi tenant identity management service, used in Cloud Foundry, but also available
 as a stand alone OAuth2 server.  It's primary role is as an OAuth2 provider, issuing tokens for client
@@ -10,12 +15,12 @@ clients, as well as various other management functions.
 
 ## Co-ordinates
 
-* Tokens: [A note on tokens, scopes and authorities](https://github.com/cloudfoundry/uaa/tree/master/docs/UAA-Tokens.md)
+* Tokens: [A note on tokens, scopes and authorities](/docs/UAA-Tokens.md)
 * Technical forum: [cf-dev mailing list](https://lists.cloudfoundry.org)
-* Docs: [docs/](https://github.com/cloudfoundry/uaa/tree/master/docs)
-* API Documentation: [UAA-APIs.rst](https://github.com/cloudfoundry/uaa/tree/master/docs/UAA-APIs.rst)
+* Docs: [docs/](/docs)
+* API Documentation: http://docs.cloudfoundry.org/api/uaa/
 * Specification: [The Oauth 2 Authorization Framework](http://tools.ietf.org/html/rfc6749)
-* LDAP: [UAA LDAP Integration](https://github.com/cloudfoundry/uaa/tree/master/docs/UAA-LDAP.md)
+* LDAP: [UAA LDAP Integration](/docs/UAA-LDAP.md)
 
 ## Quick Start
 
@@ -27,6 +32,12 @@ If this works you are in business:
     $ git clone git://github.com/cloudfoundry/uaa.git
     $ cd uaa
     $ ./gradlew run
+    
+    
+NOTE: Recent changes removed default keys and default users from the UAA.
+We currently enable default keys using the LOGIN_CONFIG_URL variable and load
+default sample data is loaded using the `default` spring profile (`spring.profiles.active`).
+In the gradle script we set `LOGIN_CONFIG_URL=file://$PWD/uaa/src/main/resources/required_configuration.yml`
 
 The apps all work together with the apps running on the same port
 (8080) as [`/uaa`](http://localhost:8080/uaa), [`/app`](http://localhost:8080/app) and [`/api`](http://localhost:8080/api).
@@ -41,33 +52,43 @@ which you should find under something like:-
 
 ### Deploy to Cloud Foundry
 
+Currently you are also required to set the following values that are not included with the defaults:
+https://github.com/cloudfoundry/uaa/blob/master/uaa/src/main/resources/required_configuration.yml
+
+
 You can also build the app and push it to Cloud Foundry, e.g.
 Our recommended way is to use a manifest file, but you can do everything on the command line.
 
-    $ ./gradlew :cloudfoundry-identity-uaa:war
-    $ cf push myuaa --no-start -m 1024M -p uaa/build/libs/cloudfoundry-identity-uaa-2.3.2-SNAPSHOT.war 
-    $ cf set-env myuaa SPRING_PROFILES_ACTIVE default,hsqldb
-    $ cf set-env myuaa UAA_URL http://myuaa.<domain>
-    $ cf set-env myuaa LOGIN_URL http://myuaa.<domain>
-    $ cf set-env myuaa JBP_CONFIG_SPRING_AUTO_RECONFIGURATION '[enabled: false]'
-    $ cf set-env myuaa JBP_CONFIG_TOMCAT '{tomcat: { version: 7.0.+ }}'
-    $ cf start myuaa
+Assuming we have a [local bosh-lite](https://github.com/cloudfoundry/bosh-lite) instance running you could do
 
-In the steps above, replace:
-  
-* `myuaa` with a unique application name
-* `2.3.2-SNAPSHOT` with the appropriate version label from your build
-* `<domain>` this is your app domain. We will be parsing this from the system environment in the future
-* You may also provide a configuration manifest where the environment variable UAA_CONFIG_YAML contains full configuration yaml.
+    $ ./gradlew manifests
+    $ cf api --skip-ssl-validation api.bosh-lite.com
+    $ cf auth admin admin
+    $ cf create-org sample-org
+    $ cf create-space -o sample-org sample-space
+    $ cf target -o sample-org -s sample-space
+    $ cf push -f build/sample-manifests/uaa-cf-application.yml
 
-### Demo of Command Line Usage on Local Server
+Your application is now available on [http://myuaa.bosh-lite.com](http://myuaa.bosh-lite.com)
+
+We can also deploy to Pivotal Web Services
+
+    $ ./gradlew manifests -Dapp=myuaa-app -Dapp-domain=cfapps.io
+    $ cf api api.run.pivotal.io
+    $ cf auth <your username> <your password>
+    $ cf create-org <your org>
+    $ cf create-space -o <your org> <your space>
+    $ cf target -o <your org> -s <your space>
+    $ cf push -f build/sample-manifests/uaa-cf-application.yml
+
+### Demo of command line usage on local server
 
 First run the UAA server as described above:
 
     $ ./gradlew run
 
-Then start another terminal and from the project base directory,  ask
-the login endpoint to tell you about the system:
+From another terminal you can use curl to verify that UAA has started by
+requesting system information:
 
     $ curl -H "Accept: application/json" localhost:8080/uaa/login
     {
@@ -77,15 +98,18 @@ the login endpoint to tell you about the system:
         "password":["password","Password"]
       }
     }
-    
-Then you can try logging in with the UAA ruby gem.  Make sure you have
-ruby 1.9, then
+
+For complex requests it is more convenient to interact with UAA using 
+`uaac`, the [UAA Command Line Client](https://github.com/cloudfoundry/cf-uaac). 
+If you have a recent ruby installed, install the CLI and use it to 
+obtain an access token:
 
     $ gem install cf-uaac
     $ uaac target http://localhost:8080/uaa
-    $ uaac token get marissa koala
+    $ uaac token owner get cf marissa -s "" -p koala
 
-(or leave out the username / password to be prompted).
+If you omit the username or password the CLI will prompt you for those
+fields.
 
 This authenticates and obtains an access token from the server using
 the OAuth2 implicit grant, similar to the approach intended for a
@@ -112,7 +136,7 @@ token grant on stdout, e.g.
       user_id: ba14fea0-9d87-4f0c-b59e-32aaa8eb1434
       client_id: cf
 
-### Running Local System Against Default MySQL and PostgreSQL Settings (and Flyway Migration Script Information)
+### Running local system against default MySQL and PostgreSQL settings (and Flyway migration script information)
 
     $ ./gradlew -Dspring.profiles.active=default,mysql run
 
@@ -147,7 +171,7 @@ as part of your command line. This disables the flywayClean task in the gradle s
 Another way to disable to the flywayClean is to not specify the spring profiles on the command line,
 but set the profiles in the uaa.yml and login.yml files.
 
-### Demo of Command Line Usage on run.pivotal.io
+### Demo of command line usage on run.pivotal.io
 
 The same command line example should work against a UAA running on
 run.pivotal.io (except for the token decoding bit because you won't
@@ -173,7 +197,7 @@ You can then try logging in with the UAA ruby gem.  Make sure you have ruby 1.9,
 This authenticates and obtains an access token from the server using the OAuth2 implicit
 grant, the same as used by a client like CF.
 
-## Integration Tests
+## Integration tests
 
 You can run the integration tests with
 
@@ -221,7 +245,7 @@ For example, to deploy the UAA as a Cloud Foundry application, you can provide a
         memory: 1024M
         instances: 1
         host: standalone-uaa
-        path: cloudfoundry-identity-uaa-3.0.0-SNAPSHOT.war
+        path: cloudfoundry-identity-uaa-<YOUR-VERSION-HERE>.war
         env:
           JBP_CONFIG_SPRING_AUTO_RECONFIGURATION: '[enabled: false]'
           JBP_CONFIG_TOMCAT: '{tomcat: { version: 7.0.+ }}'
@@ -247,7 +271,7 @@ Notice how uaa.url can be converted into an environment variable called UAA_URL
         memory: 1024M
         instances: 1
         host: standalone-uaa
-        path: cloudfoundry-identity-uaa-3.0.0-SNAPSHOT.war
+        path: cloudfoundry-identity-uaa-<YOUR-VERSION-HERE>.war
         env:
           JBP_CONFIG_SPRING_AUTO_RECONFIGURATION: '[enabled: false]'
           JBP_CONFIG_TOMCAT: '{tomcat: { version: 7.0.+ }}'
@@ -259,7 +283,7 @@ Notice how uaa.url can be converted into an environment variable called UAA_URL
               host: mail.server.host
               port: 3535
 
-### Using Gradle to Test with postgresql or mysql
+### Using Gradle to test with postgresql or mysql
 
 The default uaa unit tests (./gradlew test integrationTest) use hsqldb.
 
@@ -455,7 +479,7 @@ Here are some ways for you to get involved in the community:
   Please help out on the
   [mailing list](https://lists.cloudfoundry.org)
   by responding to questions and joining the debate.
-* Create [Github](https://github.com/cloudfoundry/uaa/issues) tickets for bugs and new features and comment and
+* Create [github](https://github.com/cloudfoundry/uaa/issues) tickets for bugs and new features and comment and
   vote on the ones that you are interested in.
 * Github is for social coding: if you want to write code, we encourage
   contributions through pull requests from
@@ -478,24 +502,3 @@ Here are some ways for you to get involved in the community:
   and <a href="https://www.yourkit.com/.net/profiler/index.jsp">YourKit .NET Profiler</a>,
   innovative and intelligent tools for profiling Java and .NET applications.
   [![](https://www.yourkit.com/images/yklogo.png)](https://www.yourkit.com/java/profiler/index.jsp)
-
-## Changes Made by the Consent2Share Development Team
-
-* Change the style/CSS of "Consent2Share account password reset request" email to match with "Set up your Consent2Share account" email
-* Fix a bug that prevented the user's email ID from being printed in the "Consent2Share account password reset request" email body
-* Added uaa.yml under config-template for configuring the UAA properties
-* Created a Docker folder and added Dockerfile to dockerize UAA
-* Added docker-image-desc.md in uaa\docs folder which describes UAA Docker image
-
-## Configure
-* By default Consent2Share staff admin user (c2s-admin@mailinator.com/AAA#aaa1) will be created.
-* Add the following environment variables:
-    - UAA_CONFIG_PATH=your-workspace/uaa/config-template/uaa.yml
-    - UAA_SMTP_HOST= your_mail_host
-    - UAA_SMTP_PORT= your_mail_port
-    - UAA_SMTP_USER= your_mail_user
-    - UAA_SMTP_PASSWORD=your_mail_pwd
-    - C2S_DB_HOST=your_db_host
-    - UAA_DB_PASSWORD=your_db_pwd
-    - C2S_APP_HOST=your_app_host(localhost/dockerhost/IP)
-    - C2S_APP_PORT=your_app_port(80)

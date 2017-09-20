@@ -1,13 +1,11 @@
 # Consent2Share project is not using SAML authentication, but SAML Service Provider Configuration is required for proper start-up and functioning of UAA.
 #
-# YOU MUST CHANGE/OVERRIDE VALUES IN AN ACTUAL DEPLOYMENT ENVIRONMENT!
-#
-# The following required SAML Properties need to change/override:
+# The following properties MUST BE changed/override if using SAML:
 #   serviceProviderKey:
 #   serviceProviderKeyPassword:
 #   serviceProviderCertificate:
 login:
-  # Following default values Must be override if using SAML
+  # BEGIN SAML CONFIGURATION
   serviceProviderKey: |
     -----BEGIN RSA PRIVATE KEY-----
     MIICXQIBAAKBgQDHtC5gUXxBKpEqZTLkNvFwNGnNIkggNOwOQVNbpO0WVHIivig5

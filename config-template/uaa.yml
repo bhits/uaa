@@ -66,7 +66,6 @@ smtp:
   port: ${UAA_SMTP_PORT}
   user: ${UAA_SMTP_USER}
   password: ${UAA_SMTP_PASSWORD}
-  fromAddress: noreply@consent2share.com
   javaMailProperties:
     mail:
       smtp:
@@ -127,6 +126,7 @@ scim:
 #    - EmailId | password | EmailId | FirstName | LastName | <Comma saperated list of permissions>
 #  For example:  - sallyshare@mailinator.com|AAA#aaa1|sallyshare@mailinator.com|sally|share|c2sUiApi.read,c2sUiApi.write
     - c2s-admin@mailinator.com|AAA#aaa1|c2s-admin@mailinator.com|admin|consent2share|staffUi.access,staffUiApi.read,staffUiApi.write
+# The default configure properties for JWT Signing Key
 jwt:
   token:
     verification-key: |

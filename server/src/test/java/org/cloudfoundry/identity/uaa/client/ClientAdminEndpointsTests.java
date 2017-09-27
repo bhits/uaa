@@ -13,27 +13,11 @@
 
 package org.cloudfoundry.identity.uaa.client;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-
-import org.cloudfoundry.identity.uaa.error.UaaException;
-import org.cloudfoundry.identity.uaa.client.ClientDetailsValidator.Mode;
 import org.cloudfoundry.identity.uaa.approval.ApprovalStore;
+import org.cloudfoundry.identity.uaa.audit.event.EntityDeletedEvent;
+import org.cloudfoundry.identity.uaa.audit.event.SystemDeletable;
+import org.cloudfoundry.identity.uaa.client.ClientDetailsValidator.Mode;
+import org.cloudfoundry.identity.uaa.error.UaaException;
 import org.cloudfoundry.identity.uaa.oauth.client.ClientDetailsModification;
 import org.cloudfoundry.identity.uaa.oauth.client.SecretChangeRequest;
 import org.cloudfoundry.identity.uaa.resources.QueryableResourceManager;
@@ -42,12 +26,21 @@ import org.cloudfoundry.identity.uaa.resources.SearchResults;
 import org.cloudfoundry.identity.uaa.resources.SimpleAttributeNameMapper;
 import org.cloudfoundry.identity.uaa.security.SecurityContextAccessor;
 import org.cloudfoundry.identity.uaa.security.StubSecurityContextAccessor;
+import org.cloudfoundry.identity.uaa.zone.ClientSecretPolicy;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
+import org.cloudfoundry.identity.uaa.zone.IdentityZone;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
+import org.cloudfoundry.identity.uaa.zone.InvalidClientSecretException;
+import org.cloudfoundry.identity.uaa.zone.ZoneAwareClientSecretPolicyValidator;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -55,16 +48,43 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.authority.AuthorityUtils;
 import org.springframework.security.oauth2.common.exceptions.BadClientCredentialsException;
-import org.springframework.security.oauth2.provider.client.BaseClientDetails;
 import org.springframework.security.oauth2.provider.ClientAlreadyExistsException;
 import org.springframework.security.oauth2.provider.ClientDetails;
-import org.springframework.security.oauth2.provider.ClientRegistrationService;
 import org.springframework.security.oauth2.provider.NoSuchClientException;
+import org.springframework.security.oauth2.provider.client.BaseClientDetails;
 
-/**
- * @author Dave Syer
- *
- */
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.cloudfoundry.identity.uaa.oauth.client.SecretChangeRequest.ChangeMode.ADD;
+import static org.cloudfoundry.identity.uaa.oauth.client.SecretChangeRequest.ChangeMode.DELETE;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.GRANT_TYPE_JWT_BEARER;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
+
 public class ClientAdminEndpointsTests {
 
     private ClientAdminEndpoints endpoints = null;
@@ -80,9 +100,11 @@ public class ClientAdminEndpointsTests {
 
     private QueryableResourceManager<ClientDetails> clientDetailsService = null;
 
+    private ClientMetadataProvisioning clientMetadataProvisioning = null;
+
     private SecurityContextAccessor securityContextAccessor = null;
 
-    private ClientRegistrationService clientRegistrationService = null;
+    private ClientServicesExtension clientRegistrationService = null;
 
     private AuthenticationManager authenticationManager = null;
 
@@ -90,24 +112,49 @@ public class ClientAdminEndpointsTests {
 
     private ClientAdminEndpointsValidator clientDetailsValidator = null;
 
+    private static final Set<String> SINGLE_REDIRECT_URL = Collections.singleton("http://redirect.url");
+
+    private IdentityZone testZone = new IdentityZone();
+
     @Rule
     public ExpectedException expected = ExpectedException.none();
 
     private ResourceMonitor<ClientDetails> clientDetailsResourceMonitor;
 
+    private static abstract class NoOpClientDetailsResourceManager implements QueryableResourceManager<ClientDetails> {
+        @Override
+        public ClientDetails create(ClientDetails resource, String zoneId) {
+            Map<String, Object> additionalInformation = new HashMap<>(resource.getAdditionalInformation());
+            additionalInformation.put("lastModified", 1463510591);
+
+            BaseClientDetails altered = new BaseClientDetails(resource);
+            altered.setAdditionalInformation(additionalInformation);
+
+            return altered;
+        }
+    }
+
     @Before
     public void setUp() throws Exception {
-        endpoints = new ClientAdminEndpoints();
+        testZone.setId("testzone");
+        endpoints = spy(new ClientAdminEndpoints());
 
-        clientDetailsService = Mockito.mock(QueryableResourceManager.class);
+        clientDetailsService = Mockito.mock(NoOpClientDetailsResourceManager.class);
+        when(clientDetailsService.create(any(ClientDetails.class), anyString())).thenCallRealMethod();
         clientDetailsResourceMonitor = Mockito.mock(ResourceMonitor.class);
         securityContextAccessor = Mockito.mock(SecurityContextAccessor.class);
-        clientRegistrationService = Mockito.mock(ClientRegistrationService.class);
+        clientRegistrationService = Mockito.mock(ClientServicesExtension.class, withSettings().extraInterfaces(SystemDeletable.class));
         authenticationManager = Mockito.mock(AuthenticationManager.class);
         approvalStore = mock(ApprovalStore.class);
         clientDetailsValidator = new ClientAdminEndpointsValidator();
+        clientMetadataProvisioning = mock(ClientMetadataProvisioning.class);
         clientDetailsValidator.setClientDetailsService(clientDetailsService);
         clientDetailsValidator.setSecurityContextAccessor(securityContextAccessor);
+        clientDetailsValidator.setClientSecretValidator(
+                new ZoneAwareClientSecretPolicyValidator(new ClientSecretPolicy(0,255,0,0,0,0,6)));
+
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,255,0,0,0,0,6));
+        IdentityZoneHolder.set(testZone);
 
         endpoints.setClientDetailsService(clientDetailsService);
         endpoints.setClientRegistrationService(clientRegistrationService);
@@ -125,18 +172,23 @@ public class ClientAdminEndpointsTests {
         attributeNameMap.put("redirect_uri", "registeredRedirectUri");
         attributeNameMap.put("access_token_validity", "accessTokenValiditySeconds");
         attributeNameMap.put("refresh_token_validity", "refreshTokenValiditySeconds");
+        attributeNameMap.put("autoapprove", "autoApproveScopes");
+        attributeNameMap.put("additionalinformation", "additionalInformation");
         endpoints.setAttributeNameMapper(new SimpleAttributeNameMapper(attributeNameMap));
 
         input = new BaseClientDetails();
         input.setClientId("foo");
         input.setClientSecret("secret");
         input.setAuthorizedGrantTypes(Arrays.asList("authorization_code"));
+        input.setRegisteredRedirectUri(SINGLE_REDIRECT_URL);
 
         for (int i=0; i<inputs.length; i++) {
             inputs[i] = new ClientDetailsModification();
             inputs[i].setClientId("foo-"+i);
             inputs[i].setClientSecret("secret-"+i);
             inputs[i].setAuthorizedGrantTypes(Arrays.asList("authorization_code"));
+            inputs[i].setRegisteredRedirectUri(new HashSet(Arrays.asList("https://foo-"+i)));
+            inputs[i].setAccessTokenValiditySeconds(300);
         }
 
         detail = new BaseClientDetails(input);
@@ -155,8 +207,25 @@ public class ClientAdminEndpointsTests {
             details[i].setAuthorities(AuthorityUtils.commaSeparatedStringToAuthorityList("uaa.none"));
         }
 
-
+        endpoints.setApplicationEventPublisher(
+            new ApplicationEventPublisher() {
+                @Override
+                public void publishEvent(ApplicationEvent event) {
+                    if (event instanceof EntityDeletedEvent) {
+                        ClientDetails client = (ClientDetails)((EntityDeletedEvent)event).getDeleted();
+                        clientRegistrationService.removeClientDetails(client.getClientId());
+                    }
+                }
+                @Override
+                public void publishEvent(Object event) {}
+            }
+        );
         endpoints.afterPropertiesSet();
+    }
+
+    @After
+    public void tearDown() {
+        IdentityZoneHolder.clear();
     }
 
     private void setSecurityContextAccessor(SecurityContextAccessor securityContextAccessor) {
@@ -187,8 +256,6 @@ public class ClientAdminEndpointsTests {
         endpoints.deleteApprovals("someclient");
     }
 
-
-
     @Test
     public void testStatistics() throws Exception {
         assertEquals(0, endpoints.getClientDeletes());
@@ -200,10 +267,73 @@ public class ClientAdminEndpointsTests {
 
     @Test
     public void testCreateClientDetails() throws Exception {
-        when(clientDetailsService.retrieve(anyString())).thenReturn(input);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).addClientDetails(detail);
+        verify(clientDetailsService).create(detail, IdentityZoneHolder.get().getId());
+        assertEquals(1463510591, result.getAdditionalInformation().get("lastModified"));
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Length_Less_Than_MinLength() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(7,255,0,0,0,0,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Length_Greater_Than_MaxLength() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,0,0,0,0,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Require_Digit() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,0,0,1,0,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Require_Uppercase() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,1,0,0,0,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Require_Lowercase() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,0,1,0,0,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testCreateClientDetails_With_Secret_Require_Special_Character() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,0,0,0,1,6));
+        IdentityZoneHolder.set(testZone);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+    }
+
+    @Test
+    public void testCreateClientDetails_With_Secret_Satisfying_Complex_Policy() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(6,255,1,1,1,1,6));
+        IdentityZoneHolder.set(testZone);
+        String complexPolicySatisfyingSecret = "Secret1@";
+        input.setClientSecret(complexPolicySatisfyingSecret);
+        detail.setClientSecret(complexPolicySatisfyingSecret);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        ClientDetails result = endpoints.createClientDetails(input);
+        assertNull(result.getClientSecret());
+        verify(clientDetailsService).create(detail, testZone.getId());
+        assertEquals(1463510591, result.getAdditionalInformation().get("lastModified"));
     }
 
     @Test
@@ -213,8 +343,30 @@ public class ClientAdminEndpointsTests {
         assertNull(endpoints.getRestrictedClientScopes());
     }
 
+    @Test
+    public void testCannot_Create_Restricted_Client_Sp_Scopes() throws Exception {
+        List<String> badScopes = new ArrayList<>();
+        badScopes.add("sps.write");
+        badScopes.add("sps.read");
+        badScopes.add("zones.*.sps.read");
+        badScopes.add("zones.*.sps.write");
+        badScopes.add("zones.*.idps.write");
+        input.setScope(badScopes);
+        for (String scope :
+            badScopes) {
+            input.setScope(Collections.singletonList(scope));
+            try {
+                endpoints.createRestrictedClientDetails(input);
+                fail("no error thrown for restricted scope "+scope);
+            } catch (InvalidClientDetailsException e) {
+                assertThat(e.getMessage(), containsString("is a restricted scope."));
+            }
+        }
+    }
+
     @Test(expected = InvalidClientDetailsException.class)
     public void testCannot_Create_Restricted_Client_Invalid_Scopes() throws Exception {
+        input.setClientId("admin");
         input.setScope(new UaaScopes().getUaaScopes());
         endpoints.createRestrictedClientDetails(input);
     }
@@ -306,22 +458,34 @@ public class ClientAdminEndpointsTests {
 
     @Test
     public void testCreateClientDetailsWithClientCredentials() throws Exception {
-        when(clientDetailsService.retrieve(anyString())).thenReturn(input);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
         input.setAuthorizedGrantTypes(Arrays.asList("client_credentials"));
         detail.setAuthorizedGrantTypes(input.getAuthorizedGrantTypes());
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).addClientDetails(detail);
+        verify(clientDetailsService).create(detail, IdentityZoneHolder.get().getId());
+    }
+
+    @Test
+    public void testCreateClientDetailsWithJwtBearer() throws Exception {
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
+        input.setAuthorizedGrantTypes(Arrays.asList(GRANT_TYPE_JWT_BEARER));
+        input.setScope(Arrays.asList(input.getClientId()+".scope"));
+        detail.setAuthorizedGrantTypes(input.getAuthorizedGrantTypes());
+        detail.setScope(input.getScope());
+        ClientDetails result = endpoints.createClientDetails(input);
+        assertNull(result.getClientSecret());
+        verify(clientDetailsService).create(detail, IdentityZoneHolder.get().getId());
     }
 
     @Test
     public void testCreateClientDetailsWithAdditionalInformation() throws Exception {
-        when(clientDetailsService.retrieve(anyString())).thenReturn(input);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
         input.setAdditionalInformation(Collections.singletonMap("foo", "bar"));
         detail.setAdditionalInformation(input.getAdditionalInformation());
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).addClientDetails(detail);
+        verify(clientDetailsService).create(detail, IdentityZoneHolder.get().getId());
     }
 
     @Test
@@ -337,16 +501,16 @@ public class ClientAdminEndpointsTests {
         input.setAuthorizedGrantTypes(Arrays.asList("password"));
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).addClientDetails(detail);
+        verify(clientRegistrationService).addClientDetails(detail);
     }
 
     @Test
     public void testFindClientDetails() throws Exception {
-        Mockito.when(clientDetailsService.query("filter", "sortBy", true)).thenReturn(
+        Mockito.when(clientDetailsService.query("filter", "sortBy", true, IdentityZoneHolder.get().getId())).thenReturn(
             Arrays.<ClientDetails> asList(detail));
         SearchResults<?> result = endpoints.listClientDetails("client_id", "filter", "sortBy", "ascending", 1, 100);
         assertEquals(1, result.getResources().size());
-        Mockito.verify(clientDetailsService).query("filter", "sortBy", true);
+        verify(clientDetailsService).query("filter", "sortBy", true, IdentityZoneHolder.get().getId());
 
         result = endpoints.listClientDetails("", "filter", "sortBy", "ascending", 1, 100);
         assertEquals(1, result.getResources().size());
@@ -354,36 +518,56 @@ public class ClientAdminEndpointsTests {
 
     @Test(expected = UaaException.class)
     public void testFindClientDetailsInvalidFilter() throws Exception {
-        Mockito.when(clientDetailsService.query("filter", "sortBy", true)).thenThrow(new IllegalArgumentException());
+        Mockito.when(clientDetailsService.query("filter", "sortBy", true, IdentityZoneHolder.get().getId())).thenThrow(new IllegalArgumentException());
         endpoints.listClientDetails("client_id", "filter", "sortBy", "ascending", 1, 100);
+    }
+
+    @Test
+    public void testFindClientDetails_Test_Attribute_Filter() throws Exception {
+        when(clientDetailsService.query(anyString(), anyString(), anyBoolean(), eq(IdentityZoneHolder.get().getId()))).thenReturn(Arrays.asList(inputs));
+        for (String attribute : Arrays.asList("client_id", "resource_ids", "authorized_grant_types", "redirect_uri", "access_token_validity", "refresh_token_validity", "autoapprove","additionalinformation")) {
+            SearchResults<Map<String, Object>> result = (SearchResults<Map<String, Object>>) endpoints.listClientDetails(attribute, "client_id pr", "sortBy", "ascending", 1, 100);
+            validateAttributeResults(result, 5, Arrays.asList(attribute));
+        }
+
+
+    }
+
+    protected void validateAttributeResults(SearchResults<Map<String,Object>> result , int size, List<String> attributes) {
+        assertEquals(5, result.getResources().size());
+        for (String s : attributes) {
+            result.getResources().stream().forEach((map) ->
+                assertTrue("Expecting attribute "+s+" to be present", map.containsKey(s))
+            );
+        }
     }
 
     @Test(expected = InvalidClientDetailsException.class)
     public void testUpdateClientDetailsWithNullCallerAndInvalidScope() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         input.setScope(Arrays.asList("read"));
         ClientDetails result = endpoints.updateClientDetails(input, input.getClientId());
         assertNull(result.getClientSecret());
         detail.setScope(Arrays.asList("read"));
-        Mockito.verify(clientRegistrationService).updateClientDetails(detail);
+        verify(clientRegistrationService).updateClientDetails(detail);
     }
 
     @Test(expected = InvalidClientDetailsException.class)
     public void testNonExistentClient1() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenThrow(new InvalidClientDetailsException(""));
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenThrow(new InvalidClientDetailsException(""));
         endpoints.getClientDetails(input.getClientId());
     }
 
     @Test(expected = NoSuchClientException.class)
     public void testNonExistentClient2() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenThrow(new BadClientCredentialsException());
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenThrow(new BadClientCredentialsException());
         endpoints.getClientDetails(input.getClientId());
     }
 
     @Test
     public void testGetClientDetails() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(input);
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(input);
         input.setScope(Arrays.asList(input.getClientId() + ".read"));
         input.setAdditionalInformation(Collections.singletonMap("foo", "bar"));
         ClientDetails result = endpoints.getClientDetails(input.getClientId());
@@ -393,18 +577,18 @@ public class ClientAdminEndpointsTests {
 
     @Test
     public void testUpdateClientDetails() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         input.setScope(Arrays.asList(input.getClientId() + ".read"));
         ClientDetails result = endpoints.updateClientDetails(input, input.getClientId());
         assertNull(result.getClientSecret());
         detail.setScope(Arrays.asList(input.getClientId() + ".read"));
-        Mockito.verify(clientRegistrationService).updateClientDetails(detail);
+        verify(clientRegistrationService).updateClientDetails(detail);
     }
 
     @Test
     public void testUpdateClientDetailsWithAdditionalInformation() throws Exception {
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         input.setScope(Arrays.asList(input.getClientId() + ".read"));
         input.setAdditionalInformation(Collections.singletonMap("foo", "bar"));
@@ -412,18 +596,18 @@ public class ClientAdminEndpointsTests {
         assertNull(result.getClientSecret());
         detail.setScope(input.getScope());
         detail.setAdditionalInformation(input.getAdditionalInformation());
-        Mockito.verify(clientRegistrationService).updateClientDetails(detail);
+        verify(clientRegistrationService).updateClientDetails(detail);
     }
 
     @Test
     public void testUpdateClientDetailsRemoveAdditionalInformation() throws Exception {
         input.setAdditionalInformation(Collections.singletonMap("foo", "bar"));
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         input.setAdditionalInformation(Collections.<String, Object> emptyMap());
         ClientDetails result = endpoints.updateClientDetails(input, input.getClientId());
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).updateClientDetails(detail);
+        verify(clientRegistrationService).updateClientDetails(detail);
     }
 
     @Test
@@ -431,13 +615,14 @@ public class ClientAdminEndpointsTests {
         BaseClientDetails updated = new BaseClientDetails(detail);
         input = new BaseClientDetails();
         input.setClientId("foo");
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(detail);
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
         input.setScope(Arrays.asList("foo.write"));
         updated.setScope(input.getScope());
         updated.setClientSecret(null);
+        updated.setRegisteredRedirectUri(SINGLE_REDIRECT_URL);
         ClientDetails result = endpoints.updateClientDetails(input, input.getClientId());
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).updateClientDetails(updated);
+        verify(clientRegistrationService).updateClientDetails(updated);
     }
 
     @Test
@@ -446,7 +631,7 @@ public class ClientAdminEndpointsTests {
         when(auth.isAuthenticated()).thenReturn(true);
         when(authenticationManager.authenticate(any(Authentication.class))).thenReturn(auth);
 
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
         SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
         when(sca.getClientId()).thenReturn(detail.getClientId());
         when(sca.isClient()).thenReturn(true);
@@ -456,14 +641,88 @@ public class ClientAdminEndpointsTests {
         change.setOldSecret(detail.getClientSecret());
         change.setSecret("newpassword");
         endpoints.changeSecret(detail.getClientId(), change);
-        Mockito.verify(clientRegistrationService).updateClientSecret(detail.getClientId(), "newpassword");
+        verify(clientRegistrationService).updateClientSecret(detail.getClientId(), "newpassword");
 
+    }
+
+    @Test
+    public void testAddSecret() {
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("bar");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(true);
+        setSecurityContextAccessor(sca);
+
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
+
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setSecret("newpassword");
+        change.setChangeMode(ADD);
+
+        endpoints.changeSecret(detail.getClientId(), change);
+        verify(clientRegistrationService).addClientSecret(detail.getClientId(), "newpassword", IdentityZoneHolder.get().getId());
+    }
+
+    @Test
+    public void testAddingThirdSecretForClient() {
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("bar");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(true);
+        setSecurityContextAccessor(sca);
+
+        detail.setClientSecret("hash1 hash2");
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
+
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setSecret("newpassword");
+        change.setOldSecret("hash1");
+        change.setChangeMode(ADD);
+        expected.expect(InvalidClientDetailsException.class);
+        expected.expectMessage("client secret is either empty or client already has two secrets.");
+        endpoints.changeSecret(detail.getClientId(), change);
+    }
+
+    @Test
+    public void testDeleteSecret() {
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("bar");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(true);
+        setSecurityContextAccessor(sca);
+
+        detail.setClientSecret("hash1 hash2");
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setChangeMode(DELETE);
+
+        endpoints.changeSecret(detail.getClientId(), change);
+        verify(clientRegistrationService).deleteClientSecret(detail.getClientId(), IdentityZoneHolder.get().getId());
+    }
+
+    @Test
+    public void testDeleteSecretWhenOnlyOneSecret() {
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("bar");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(true);
+        setSecurityContextAccessor(sca);
+
+        detail.setClientSecret("hash1");
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setChangeMode(DELETE);
+
+        expected.expect(InvalidClientDetailsException.class);
+        expected.expectMessage("client secret is either empty or client has only one secret.");
+
+        endpoints.changeSecret(detail.getClientId(), change);
     }
 
     @Test
     public void testChangeSecretDeniedForUser() throws Exception {
 
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
 
         SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
         when(sca.getClientId()).thenReturn(detail.getClientId());
@@ -482,7 +741,7 @@ public class ClientAdminEndpointsTests {
     @Test
     public void testChangeSecretDeniedForNonAdmin() throws Exception {
 
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
 
         SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
         when(sca.getClientId()).thenReturn("bar");
@@ -499,9 +758,29 @@ public class ClientAdminEndpointsTests {
     }
 
     @Test
+    public void testAddSecretDeniedForNonAdmin() throws Exception {
+
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
+
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("bar");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(false);
+        setSecurityContextAccessor(sca);
+
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setSecret("newpassword");
+        change.setChangeMode(ADD);
+        expected.expect(InvalidClientDetailsException.class);
+        expected.expectMessage("Not permitted to change");
+        endpoints.changeSecret(detail.getClientId(), change);
+
+    }
+
+    @Test
     public void testChangeSecretDeniedWhenOldSecretNotProvided() throws Exception {
 
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
 
 
         when(authenticationManager.authenticate(any(Authentication.class))).thenThrow(new BadCredentialsException(""));
@@ -522,28 +801,9 @@ public class ClientAdminEndpointsTests {
     }
 
     @Test
-    public void testChangeSecretDeniedWhenOldSecretNotProvidedEvenFormAdmin() throws Exception {
-
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
-        when(authenticationManager.authenticate(any(Authentication.class))).thenThrow(new BadCredentialsException(""));
-        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
-        when(sca.getClientId()).thenReturn(detail.getClientId());
-        when(sca.isClient()).thenReturn(true);
-        when(sca.isAdmin()).thenReturn(true);
-        setSecurityContextAccessor(sca);
-
-        SecretChangeRequest change = new SecretChangeRequest();
-        change.setSecret("newpassword");
-        expected.expect(InvalidClientDetailsException.class);
-        expected.expectMessage("Previous secret is required");
-        endpoints.changeSecret(detail.getClientId(), change);
-
-    }
-
-    @Test
     public void testChangeSecretByAdmin() throws Exception {
 
-        when(clientDetailsService.retrieve(detail.getClientId())).thenReturn(detail);
+        when(clientDetailsService.retrieve(detail.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(detail);
 
         SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
         when(sca.getClientId()).thenReturn("admin");
@@ -555,24 +815,51 @@ public class ClientAdminEndpointsTests {
         change.setOldSecret(detail.getClientSecret());
         change.setSecret("newpassword");
         endpoints.changeSecret(detail.getClientId(), change);
-        Mockito.verify(clientRegistrationService).updateClientSecret(detail.getClientId(), "newpassword");
+        verify(clientRegistrationService).updateClientSecret(detail.getClientId(), "newpassword");
 
+    }
+
+
+    @Test(expected = InvalidClientSecretException.class)
+    public void testChangeSecretDeniedTooLong() throws Exception {
+        testZone.getConfig().setClientSecretPolicy(new ClientSecretPolicy(0,5,0,0,0,0,6));
+        String complexPolicySatisfyingSecret = "Secret1@";
+
+        when(clientDetailsService.retrieve(detail.getClientId(), testZone.getId())).thenReturn(detail);
+
+        SecurityContextAccessor sca = mock(SecurityContextAccessor.class);
+        when(sca.getClientId()).thenReturn("admin");
+        when(sca.isClient()).thenReturn(true);
+        when(sca.isAdmin()).thenReturn(true);
+        setSecurityContextAccessor(sca);
+
+        SecretChangeRequest change = new SecretChangeRequest();
+        change.setOldSecret(detail.getClientSecret());
+        change.setSecret(complexPolicySatisfyingSecret);
+        endpoints.changeSecret(detail.getClientId(), change);
     }
 
     @Test
     public void testRemoveClientDetailsAdminCaller() throws Exception {
         Mockito.when(securityContextAccessor.isAdmin()).thenReturn(true);
-        Mockito.when(clientDetailsService.retrieve("foo")).thenReturn(detail);
+        Mockito.when(clientDetailsService.retrieve("foo", IdentityZoneHolder.get().getId())).thenReturn(detail);
         ClientDetails result = endpoints.removeClientDetails("foo");
         assertNull(result.getClientSecret());
-        Mockito.verify(clientRegistrationService).removeClientDetails("foo");
+        ArgumentCaptor<EntityDeletedEvent> captor = ArgumentCaptor.forClass(EntityDeletedEvent.class);
+        verify(endpoints).publish(captor.capture());
+        verify(clientRegistrationService).removeClientDetails("foo");
+        assertNotNull(captor.getValue());
+        Object deleted = captor.getValue().getDeleted();
+        assertNotNull(deleted);
+        assertTrue(deleted instanceof ClientDetails);
+        assertEquals("foo", ((ClientDetails)deleted).getClientId());
     }
 
     @Test(expected = InvalidClientDetailsException.class)
     public void testScopeIsRestrictedByCaller() throws Exception {
         BaseClientDetails caller = new BaseClientDetails("caller", null, "none", "client_credentials,implicit",
             "uaa.none");
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         setSecurityContextAccessor(new StubSecurityContextAccessor() {
             @Override
             public String getClientId() {
@@ -587,7 +874,7 @@ public class ClientAdminEndpointsTests {
     public void testValidScopeIsNotRestrictedByCaller() throws Exception {
         BaseClientDetails caller = new BaseClientDetails("caller", null, "none", "client_credentials,implicit",
             "uaa.none");
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         setSecurityContextAccessor(new StubSecurityContextAccessor() {
             @Override
             public String getClientId() {
@@ -602,7 +889,7 @@ public class ClientAdminEndpointsTests {
     public void testClientPrefixScopeIsNotRestrictedByClient() throws Exception {
         BaseClientDetails caller = new BaseClientDetails("caller", null, "none", "client_credentials,implicit",
             "uaa.none");
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         setSecurityContextAccessor(new StubSecurityContextAccessor() {
             @Override
             public String getClientId() {
@@ -617,7 +904,7 @@ public class ClientAdminEndpointsTests {
     public void testAuthorityIsRestrictedByCaller() throws Exception {
         BaseClientDetails caller = new BaseClientDetails("caller", null, "none", "client_credentials,implicit",
             "uaa.none");
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         setSecurityContextAccessor(new StubSecurityContextAccessor() {
             @Override
             public String getClientId() {
@@ -632,7 +919,7 @@ public class ClientAdminEndpointsTests {
     public void testAuthorityAllowedByCaller() throws Exception {
         BaseClientDetails caller = new BaseClientDetails("caller", null, "uaa.none", "client_credentials,implicit",
             "uaa.none");
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         setSecurityContextAccessor(new StubSecurityContextAccessor() {
             @Override
             public String getClientId() {
@@ -647,7 +934,7 @@ public class ClientAdminEndpointsTests {
     public void cannotExpandScope() throws Exception {
         BaseClientDetails caller = new BaseClientDetails();
         caller.setScope(Arrays.asList("none"));
-        when(clientDetailsService.retrieve("caller")).thenReturn(caller);
+        when(clientDetailsService.retrieve("caller", IdentityZoneHolder.get().getId())).thenReturn(caller);
         detail.setAuthorizedGrantTypes(Arrays.asList("implicit"));
         detail.setClientSecret("hello");
         endpoints.createClientDetails(detail);
@@ -739,7 +1026,7 @@ public class ClientAdminEndpointsTests {
 
     @Test
     public void testCreateClientWithAutoapproveScopesList() throws Exception {
-        when(clientDetailsService.retrieve(anyString())).thenReturn(input);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
         List<String> scopes = Arrays.asList("foo.read","foo.write");
         List<String> autoApproveScopes = Arrays.asList("foo.read");
         input.setScope(scopes);
@@ -750,7 +1037,7 @@ public class ClientAdminEndpointsTests {
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
         ArgumentCaptor<BaseClientDetails> clientCaptor = ArgumentCaptor.forClass(BaseClientDetails.class);
-        Mockito.verify(clientRegistrationService).addClientDetails(clientCaptor.capture());
+        verify(clientDetailsService).create(clientCaptor.capture(), anyString());
         BaseClientDetails created = clientCaptor.getValue();
         assertSetEquals(autoApproveScopes, created.getAutoApproveScopes());
         assertTrue(created.isAutoApprove("foo.read"));
@@ -763,7 +1050,7 @@ public class ClientAdminEndpointsTests {
 
     @Test
     public void testCreateClientWithAutoapproveScopesTrue() throws Exception {
-        when(clientDetailsService.retrieve(anyString())).thenReturn(input);
+        when(clientDetailsService.retrieve(anyString(), anyString())).thenReturn(input);
         List<String> scopes = Arrays.asList("foo.read","foo.write");
         List<String> autoApproveScopes = Arrays.asList("true");
         input.setScope(scopes);
@@ -774,7 +1061,7 @@ public class ClientAdminEndpointsTests {
         ClientDetails result = endpoints.createClientDetails(input);
         assertNull(result.getClientSecret());
         ArgumentCaptor<BaseClientDetails> clientCaptor = ArgumentCaptor.forClass(BaseClientDetails.class);
-        Mockito.verify(clientRegistrationService).addClientDetails(clientCaptor.capture());
+        verify(clientDetailsService).create(clientCaptor.capture(), anyString());
         BaseClientDetails created = clientCaptor.getValue();
         assertSetEquals(autoApproveScopes, created.getAutoApproveScopes());
         assertTrue(created.isAutoApprove("foo.read"));
@@ -791,12 +1078,12 @@ public class ClientAdminEndpointsTests {
         detail.setScope(scopes);
         detail.setAutoApproveScopes(autoApproveScopes);
 
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         ClientDetails result = endpoints.updateClientDetails(detail, input.getClientId());
         assertNull(result.getClientSecret());
         ArgumentCaptor<BaseClientDetails> clientCaptor = ArgumentCaptor.forClass(BaseClientDetails.class);
-        Mockito.verify(clientRegistrationService).updateClientDetails(clientCaptor.capture());
+        verify(clientRegistrationService).updateClientDetails(clientCaptor.capture(), anyString());
         BaseClientDetails updated = clientCaptor.getValue();
         assertSetEquals(autoApproveScopes, updated.getAutoApproveScopes());
         assertTrue(updated.isAutoApprove("foo.read"));
@@ -812,17 +1099,15 @@ public class ClientAdminEndpointsTests {
         detail.setScope(scopes);
         detail.setAutoApproveScopes(autoApproveScopes);
 
-        Mockito.when(clientDetailsService.retrieve(input.getClientId())).thenReturn(
+        Mockito.when(clientDetailsService.retrieve(input.getClientId(), IdentityZoneHolder.get().getId())).thenReturn(
             new BaseClientDetails(input));
         ArgumentCaptor<BaseClientDetails> clientCaptor = ArgumentCaptor.forClass(BaseClientDetails.class);
         ClientDetails result = endpoints.updateClientDetails(detail, input.getClientId());
         assertNull(result.getClientSecret());
-
-        Mockito.verify(clientRegistrationService).updateClientDetails(clientCaptor.capture());
+        verify(clientRegistrationService).updateClientDetails(clientCaptor.capture(), anyString());
         BaseClientDetails updated = clientCaptor.getValue();
         assertSetEquals(autoApproveScopes, updated.getAutoApproveScopes());
         assertTrue(updated.isAutoApprove("foo.read"));
         assertTrue(updated.isAutoApprove("foo.write"));
     }
-
 }

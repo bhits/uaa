@@ -18,6 +18,7 @@ import org.apache.commons.logging.LogFactory;
 import org.cloudfoundry.identity.uaa.provider.saml.idp.SamlServiceProvider;
 import org.cloudfoundry.identity.uaa.provider.saml.idp.SamlServiceProviderConfigurator;
 import org.cloudfoundry.identity.uaa.provider.saml.idp.SamlServiceProviderProvisioning;
+import org.cloudfoundry.identity.uaa.provider.saml.idp.SamlSpAlreadyExistsException;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.opensaml.saml2.metadata.provider.MetadataProviderException;
@@ -35,6 +36,7 @@ import java.util.List;
 
 import static org.springframework.http.HttpStatus.OK;
 import static org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY;
+import static org.springframework.web.bind.annotation.RequestMethod.DELETE;
 import static org.springframework.web.bind.annotation.RequestMethod.GET;
 import static org.springframework.web.bind.annotation.RequestMethod.POST;
 import static org.springframework.web.bind.annotation.RequestMethod.PUT;
@@ -59,17 +61,15 @@ public class SamlServiceProviderEndpoints {
         throws MetadataProviderException {
         String zoneId = IdentityZoneHolder.get().getId();
         body.setIdentityZoneId(zoneId);
-
-        samlConfigurator.addSamlServiceProvider(body);
-
-        SamlServiceProvider createdSp = serviceProviderProvisioning.create(body);
+        samlConfigurator.validateSamlServiceProvider(body);
+        SamlServiceProvider createdSp = serviceProviderProvisioning.create(body, zoneId);
         return new ResponseEntity<>(createdSp, HttpStatus.CREATED);
     }
 
     @RequestMapping(value = "{id}", method = PUT)
     public ResponseEntity<SamlServiceProvider> updateServiceProvider(@PathVariable String id,
                                                                      @RequestBody SamlServiceProvider body) throws MetadataProviderException {
-        SamlServiceProvider existing = serviceProviderProvisioning.retrieve(id);
+        SamlServiceProvider existing = serviceProviderProvisioning.retrieve(id, IdentityZoneHolder.get().getId());
         String zoneId = IdentityZoneHolder.get().getId();
         body.setId(id);
         body.setIdentityZoneId(zoneId);
@@ -78,9 +78,9 @@ public class SamlServiceProviderEndpoints {
         }
         body.setEntityId(existing.getEntityId());
 
-        samlConfigurator.addSamlServiceProvider(body);
+        samlConfigurator.validateSamlServiceProvider(body);
 
-        SamlServiceProvider updatedSp = serviceProviderProvisioning.update(body);
+        SamlServiceProvider updatedSp = serviceProviderProvisioning.update(body, zoneId);
         return new ResponseEntity<>(updatedSp, OK);
     }
 
@@ -96,7 +96,14 @@ public class SamlServiceProviderEndpoints {
 
     @RequestMapping(value = "{id}", method = GET)
     public ResponseEntity<SamlServiceProvider> retrieveServiceProvider(@PathVariable String id) {
-        SamlServiceProvider serviceProvider = serviceProviderProvisioning.retrieve(id);
+        SamlServiceProvider serviceProvider = serviceProviderProvisioning.retrieve(id, IdentityZoneHolder.get().getId());
+        return new ResponseEntity<>(serviceProvider, OK);
+    }
+
+    @RequestMapping(value = "{id}", method = DELETE)
+    public ResponseEntity<SamlServiceProvider> deleteServiceProvider(@PathVariable String id) {
+        SamlServiceProvider serviceProvider = serviceProviderProvisioning.retrieve(id, IdentityZoneHolder.get().getId());
+        serviceProviderProvisioning.delete(id, IdentityZoneHolder.get().getId());
         return new ResponseEntity<>(serviceProvider, OK);
     }
 
@@ -117,6 +124,11 @@ public class SamlServiceProviderEndpoints {
     @ExceptionHandler(EmptyResultDataAccessException.class)
     public ResponseEntity<String> handleProviderNotFoundException() {
         return new ResponseEntity<>("Provider not found.", HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(SamlSpAlreadyExistsException.class)
+    public ResponseEntity<String> handleDuplicateServiceProvider(){
+        return new ResponseEntity<>("SAML SP with the same entity id already exists.", HttpStatus.CONFLICT);
     }
 
 }

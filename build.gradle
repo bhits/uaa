@@ -1,3 +1,8 @@
+import org.apache.tools.ant.filters.ReplaceTokens
+
+import java.nio.file.Files
+import java.nio.file.Paths
+
 buildscript {
   apply from: file('shared_versions.gradle')
 
@@ -5,7 +10,7 @@ buildscript {
     mavenCentral()
     jcenter()
     maven {
-      url 'http://repo.spring.io/plugins-release'
+      url 'https://repo.spring.io/plugins-release'
     }
     maven {
       url 'https://plugins.gradle.org/m2/'
@@ -13,19 +18,21 @@ buildscript {
   }
 
   dependencies {
-    classpath group: 'org.gradle.api.plugins', name: 'gradle-cargo-plugin', version: '1.5'
+    classpath group: 'com.bmuschko', name: 'gradle-cargo-plugin', version: '2.2.3'
     classpath group: 'org.jfrog.buildinfo', name: 'build-info-extractor-gradle', version: '2.2.4'
     classpath group: 'org.kt3k.gradle.plugin', name: 'coveralls-gradle-plugin', version: '2.4.0'
     classpath group: 'org.mariadb.jdbc', name: 'mariadb-java-client', version:'1.1.8'
     classpath group: 'postgresql', name: 'postgresql', version:'9.1-901.jdbc3'
+    classpath group: 'com.microsoft.sqlserver', name: 'mssql-jdbc', version: '6.1.0.jre8'
     classpath group: 'org.flywaydb', name: 'flyway-gradle-plugin', version: flywayVersion
     classpath 'org.springframework.build.gradle:propdeps-plugin:0.0.7'
-    classpath "gradle.plugin.com.dorongold.plugins:task-tree:1.2.1"
+    classpath "gradle.plugin.com.dorongold.plugins:task-tree:1.2.2"
     classpath 'org.asciidoctor:asciidoctor-gradle-plugin:1.5.3'
   }
 }
 
 apply plugin: "com.dorongold.task-tree"
+apply from: file('docker.gradle')
 
 ext {
   databaseType = {
@@ -34,6 +41,8 @@ ext {
       'mysql'
     } else if (activeProfiles.contains('postgresql')) {
       'postgresql'
+    } else if (activeProfiles.contains('sqlserver')){
+      'sqlserver'
     } else {
       'hsqldb'
     }
@@ -60,10 +69,16 @@ allprojects {
 
   repositories {
     mavenCentral()
+    maven {
+        url 'https://build.shibboleth.net/nexus/content/repositories/releases/'
+    }
   }
 }
 
+//apply plugin: 'com.bmuschko.cargo-base'
+apply plugin: 'com.bmuschko.cargo'
 apply plugin: 'org.flywaydb.flyway'
+apply plugin: 'jacoco'
 
 flyway {
   switch (databaseType()) {
@@ -80,6 +95,12 @@ flyway {
       user = 'root'
       password = 'changeme'
       break
+    case 'sqlserver':
+      driver = 'com.microsoft.sqlserver.jdbc.SQLServerDriver'
+      url = 'jdbc:sqlserver://localhost:1433;database=uaa;'
+      user = 'root'
+      password = 'changemeCHANGEME1234!'
+      break
   }
 }
 
@@ -89,16 +110,36 @@ task prepareDatabase {
   dependsOn { databaseType().equals('hsqldb') ? null : flywayClean }
 }
 
-apply plugin: 'cargo'
+def jacocoJarPath = project.zipTree(configurations.jacocoAgent.singleFile).filter({ it.name == 'jacocoagent.jar' }).asPath
+def jacocoLocation = System.getProperty('java.io.tmpdir') + '/cargo/jacocoagent.jar'
 
 task cleanCargoConfDir {
-  delete file(System.getenv('TMPDIR') + '/cargo/conf')
+  delete file(System.getProperty('java.io.tmpdir') + '/cargo/conf')
+  delete file(jacocoLocation)
+  try {
+    Files.createDirectory(Paths.get(System.getProperty('java.io.tmpdir') + '/cargo'))
+  } catch (all) {}
+  Files.copy(Paths.get(jacocoJarPath), Paths.get(jacocoLocation))
 }
 
 cargoStartLocal.dependsOn assemble, prepareDatabase
 cargoRunLocal.dependsOn cleanCargoConfDir, assemble
 
 task run(dependsOn: cargoRunLocal)
+
+task manifests(dependsOn: assemble, type: Copy) {
+  from('uaa/src/test/resources/sample-manifests') {
+    include '**/*.yml'
+    filter(ReplaceTokens,
+           tokens: [
+             version: uaaVersion,
+             app: System.getProperty('app', 'myuaa'),
+             appdomain: System.getProperty('app-domain', 'bosh-lite.com'),
+           ]
+    )
+  }
+  into 'build/sample-manifests'
+}
 
 subprojects {
   apply plugin: 'java'
@@ -136,12 +177,11 @@ subprojects {
     archives javadocJar
   }
   repositories {
-    maven { url "http://maven.springframework.org/release" }
-    maven { url "http://maven.springframework.org/milestone" }
-    maven { url "http://maven.springframework.org/snapshot" }
-    maven { url "http://objectstyle.org/maven2/" }
-    maven { url "http://repo.springsource.org/ext-release-local" }
-    maven { url "http://repo.maven.apache.org/maven2" }
+    maven { url "https://repo.spring.io/release" }
+    maven { url "https://repo.spring.io/milestone" }
+    maven { url "https://repo.spring.io/snapshot" }
+    maven { url "https://repo.spring.io/ext-release-local" }
+    maven { url "https://repo.maven.apache.org/maven2" }
   }
 
   install {
@@ -205,11 +245,11 @@ subprojects {
   }
 }
 
-def jacocoJarPath = project.zipTree(configurations.jacocoAgent.singleFile).filter({ it.name == 'jacocoagent.jar' }).asPath
+
 def integrationTestCoverageExecutionData = "${buildDir}/integrationTestCoverageReport.exec"
 
 cargo {
-  containerId = 'tomcat7x'
+  containerId = tomcatContainerId
   port = 8080
 
   deployable {
@@ -223,14 +263,19 @@ cargo {
   }
 
   local {
-    jvmArgs = "-javaagent:${jacocoJarPath}=output=file,dumponexit=true,append=false,destfile=${integrationTestCoverageExecutionData}"
+    jvmArgs = "-javaagent:${jacocoLocation}=output=file,dumponexit=true,append=false,destfile=${integrationTestCoverageExecutionData} -DLOGIN_CONFIG_URL=file://"+new File(".").absolutePath+"/uaa/src/main/resources/required_configuration.yml"
     outputFile = file('uaa/build/reports/tests/uaa-server.log')
+    configFile {
+      file = file('scripts/travis/tomcat-conf/context.xml')
+      toDir = 'conf'
+
+    }
     systemProperties {
       property 'spring.profiles.active', System.getProperty('spring.profiles.active', 'default')
     }
 
     installer {
-      installUrl = 'http://repo2.maven.org/maven2/org/apache/tomcat/tomcat/7.0.55/tomcat-7.0.55.tar.gz'
+      installUrl = 'https://repo1.maven.org/maven2/org/apache/tomcat/tomcat/' + tomcatVersion + '/tomcat-' + tomcatVersion + '.tar.gz'
       downloadDir = file("$buildDir/download")
       extractDir = file("$buildDir/extract")
     }
@@ -245,7 +290,7 @@ project.gradle.taskGraph.whenReady { TaskExecutionGraph graph ->
     }
 
     local {
-//      jvmArgs = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
+//      jvmArgs = jvmArgs + " -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
 
       systemProperties {
           //property 'uaa.allowUnverifiedUsers', 'false'
@@ -254,7 +299,6 @@ project.gradle.taskGraph.whenReady { TaskExecutionGraph graph ->
       }
     }
   }
-
   project.allprojects.collect({ it.tasks.withType(Test) }).flatten().each {
     it.systemProperty 'spring.profiles.active', System.getProperty('spring.profiles.active', 'default')
   }
@@ -263,9 +307,7 @@ project.gradle.taskGraph.whenReady { TaskExecutionGraph graph ->
 apply plugin: 'com.github.kt3k.coveralls'
 
 Project identityModel = subprojects.find { it.name.equals('cloudfoundry-identity-model') }
-Project identityCommon = subprojects.find { it.name.equals('cloudfoundry-identity-common') }
-Project identityScim = subprojects.find { it.name.equals('cloudfoundry-identity-scim') }
-Project identityLogin = subprojects.find { it.name.equals('cloudfoundry-identity-login') }
+Project identityServer = subprojects.find { it.name.equals('cloudfoundry-identity-server') }
 Project identityUaa = subprojects.find { it.name.equals('cloudfoundry-identity-uaa') }
 
 def publishedProjects = subprojects
@@ -280,9 +322,7 @@ integrationTest.dependsOn subprojects.integrationTest
 test.dependsOn subprojects.test
 test.mustRunAfter integrationTest
 
-
-task jacocoRootReport(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
-  dependsOn = [integrationTest, test]
+def jacocoRootReportConfiguration = {
   additionalSourceDirs = files(subprojects.sourceSets.main.allSource.srcDirs)
   sourceDirectories = files(subprojects.sourceSets.main.allSource.srcDirs)
   classDirectories = files(subprojects.sourceSets.main.output)
@@ -290,6 +330,7 @@ task jacocoRootReport(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
   reports {
     html.enabled = true
     xml.enabled = true
+    xml.destination = "${buildDir}/reports/jacoco/jacocoRootReport/jacocoRootReport.xml"
     csv.enabled = false
   }
   onlyIf = {
@@ -301,6 +342,28 @@ task jacocoRootReport(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
     })
   }
 }
+
+task jacocoRootReportIntegrationTest(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
+  configure jacocoRootReportConfiguration
+  dependsOn = [integrationTest]
+}
+
+task jacocoRootReportTest(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
+  configure jacocoRootReportConfiguration
+  dependsOn = [test]
+}
+
+task jacocoRootReportServerTest(type: org.gradle.testing.jacoco.tasks.JacocoReport) {
+  configure jacocoRootReportConfiguration
+  dependsOn(':cloudfoundry-identity-server:test')
+}
+
+task mockAssertion(type: JavaExec) {
+  main = 'org.cloudfoundry.identity.uaa.saml.MockSamlAssertion'
+  args = System.getProperty("file", null) == null ? [] : [System.getProperty("file")]
+  classpath = files(subprojects.sourceSets.test.runtimeClasspath)
+}
+
 
 coveralls {
   sourceDirs = publishedProjects.sourceSets.main.allSource.srcDirs.flatten()

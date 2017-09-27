@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="ISO-8859-1"?>
 <!--
-    Cloud Foundry 
+    Cloud Foundry
     Copyright (c) [2009-2014] Pivotal Software, Inc. All Rights Reserved.
 
     This product is licensed to you under the Apache License, Version 2.0 (the "License").
@@ -32,11 +32,6 @@
         <url-pattern>/*</url-pattern>
     </filter-mapping>
 
-    <filter>
-        <filter-name>xFrameOptionsFilter</filter-name>
-        <filter-class>org.cloudfoundry.identity.uaa.security.web.XFrameOptionsFilter</filter-class>
-    </filter>
-
     <!-- After we merge in epic/multitenancy, we can add this to the post process of the security filter -->
     <filter-mapping>
         <filter-name>backwardsCompatibleScopeParameter</filter-name>
@@ -48,10 +43,6 @@
         <filter-class>org.cloudfoundry.identity.uaa.web.BackwardsCompatibleScopeParsingFilter</filter-class>
     </filter>
 
-    <filter-mapping>
-        <filter-name>xFrameOptionsFilter</filter-name>
-        <url-pattern>/*</url-pattern>
-    </filter-mapping>
     <listener>
         <listener-class>
             org.springframework.web.context.request.RequestContextListener
@@ -60,7 +51,7 @@
 
     <servlet>
         <servlet-name>spring</servlet-name>
-        <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+        <servlet-class>org.cloudfoundry.identity.uaa.web.RecognizeFailureDispatcherServlet</servlet-class>
         <init-param>
             <param-name>contextInitializerClasses</param-name>
             <param-value>org.cloudfoundry.identity.uaa.impl.config.YamlServletProfileInitializer</param-value>
@@ -71,7 +62,7 @@
         </init-param>
         <init-param>
             <param-name>environmentConfigLocations</param-name>
-            <param-value>${LOGIN_CONFIG_URL},file:${LOGIN_CONFIG_PATH}/login.yml,file:${CLOUD_FOUNDRY_CONFIG_PATH}/login.yml,${UAA_CONFIG_URL},file:${UAA_CONFIG_PATH}/uaa.yml,file:${CLOUD_FOUNDRY_CONFIG_PATH}/uaa.yml</param-value>
+            <param-value>${LOGIN_CONFIG_URL},file:${LOGIN_CONFIG_PATH}/login.yml,file:${CLOUD_FOUNDRY_CONFIG_PATH}/login.yml,${UAA_CONFIG_URL},file:${UAA_CONFIG_FILE},file:${UAA_CONFIG_PATH}/uaa.yml,file:${CLOUD_FOUNDRY_CONFIG_PATH}/uaa.yml</param-value>
         </init-param>
         <load-on-startup>1</load-on-startup>
     </servlet>

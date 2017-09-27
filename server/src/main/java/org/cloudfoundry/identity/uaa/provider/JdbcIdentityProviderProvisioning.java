@@ -12,7 +12,6 @@
  *******************************************************************************/
 package org.cloudfoundry.identity.uaa.provider;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.cloudfoundry.identity.uaa.audit.event.SystemDeletable;
@@ -46,7 +45,7 @@ public class JdbcIdentityProviderProvisioning implements IdentityProviderProvisi
 
     public static final String IDENTITY_PROVIDERS_QUERY = "select " + ID_PROVIDER_FIELDS + " from identity_provider where identity_zone_id=?";
 
-    public static final String IDENTITY_ACTIVE_PROVIDERS_QUERY = IDENTITY_PROVIDERS_QUERY + " and active";
+    public static final String IDENTITY_ACTIVE_PROVIDERS_QUERY = IDENTITY_PROVIDERS_QUERY + " and active=?";
 
     public static final String ID_PROVIDER_UPDATE_FIELDS = "version,lastmodified,name,type,config,active".replace(",","=?,")+"=?";
 
@@ -61,6 +60,7 @@ public class JdbcIdentityProviderProvisioning implements IdentityProviderProvisi
     public static final String IDENTITY_PROVIDER_BY_ORIGIN_QUERY = "select " + ID_PROVIDER_FIELDS + " from identity_provider " + "where origin_key=? and identity_zone_id=? ";
 
     protected final JdbcTemplate jdbcTemplate;
+
 
     private final RowMapper<IdentityProvider> mapper = new IdentityProviderRowMapper();
 
@@ -77,7 +77,7 @@ public class JdbcIdentityProviderProvisioning implements IdentityProviderProvisi
 
     @Override
     public List<IdentityProvider> retrieveActive(String zoneId) {
-        return jdbcTemplate.query(IDENTITY_ACTIVE_PROVIDERS_QUERY, mapper, zoneId);
+        return jdbcTemplate.query(IDENTITY_ACTIVE_PROVIDERS_QUERY, mapper, zoneId, true);
     }
 
     @Override
@@ -170,6 +170,19 @@ public class JdbcIdentityProviderProvisioning implements IdentityProviderProvisi
     }
 
     @Override
+    public int deleteByClient(String clientId, String zoneId) {
+        //no op - nothing to do here
+        return 0;
+    }
+
+    @Override
+    public int deleteByUser(String userId, String zoneId) {
+        //no op - nothing to do here
+        return 0;
+    }
+
+
+    @Override
     public Log getLogger() {
         return logger;
     }
@@ -197,7 +210,7 @@ public class JdbcIdentityProviderProvisioning implements IdentityProviderProvisi
                         definition = JsonUtils.readValue(config, RawXOAuthIdentityProviderDefinition.class);
                         break;
                     case OriginKeys.OIDC10 :
-                        definition = JsonUtils.readValue(config, XOIDCIdentityProviderDefinition.class);
+                        definition = JsonUtils.readValue(config, OIDCIdentityProviderDefinition.class);
                         break;
                     case OriginKeys.UAA :
                         definition = JsonUtils.readValue(config, UaaIdentityProviderDefinition.class);

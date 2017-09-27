@@ -13,44 +13,45 @@
 package org.cloudfoundry.identity.uaa.mock.oauth;
 
 import org.cloudfoundry.identity.uaa.mock.InjectedMockContextTest;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.springframework.security.oauth2.provider.ClientRegistrationService;
 
 import java.util.Set;
 
 public class CheckDefaultAuthoritiesMvcMockTests extends InjectedMockContextTest {
 
-    ClientRegistrationService clientRegistrationService;
+    ClientServicesExtension clientRegistrationService;
     private Set<String> defaultAuthorities;
+    public static final String[] EXPECTED_DEFAULT_GROUPS = new String[]{
+        "openid",
+        "scim.me",
+        "cloud_controller.read",
+        "cloud_controller.write",
+        "cloud_controller_service_permissions.read",
+        "password.write",
+        "scim.userids",
+        "uaa.user",
+        "approvals.me",
+        "oauth.approvals",
+        "profile",
+        "roles",
+        "user_attributes",
+        "uaa.offline_token"
+    };
 
     @Before
     public void setUp() throws Exception {
-        clientRegistrationService = getWebApplicationContext().getBean(ClientRegistrationService.class);
+        clientRegistrationService = getWebApplicationContext().getBean(ClientServicesExtension.class);
 
         defaultAuthorities = (Set<String>) getWebApplicationContext().getBean("defaultUserAuthorities");
     }
 
     @Test
     public void testDefaultAuthorities() throws Exception {
-        Assert.assertEquals(13, defaultAuthorities.size());
-        String[] expected = new String[] {
-            "openid",
-            "scim.me",
-            "cloud_controller.read",
-            "cloud_controller.write",
-            "cloud_controller_service_permissions.read",
-            "password.write",
-            "scim.userids",
-            "uaa.user",
-            "approvals.me",
-            "oauth.approvals",
-            "profile",
-            "roles",
-            "user_attributes"
-        };
-        for (String s : expected) {
+        Assert.assertEquals(14, defaultAuthorities.size());
+        for (String s : EXPECTED_DEFAULT_GROUPS) {
             Assert.assertTrue("Expecting authority to be present:"+s,defaultAuthorities.contains(s));
         }
     }

@@ -24,8 +24,10 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class IdentityZoneConfiguration {
 
+    private ClientSecretPolicy clientSecretPolicy = new ClientSecretPolicy();
     private TokenPolicy tokenPolicy = new TokenPolicy();
     private SamlConfig samlConfig = new SamlConfig();
+    private CorsPolicy corsPolicy = new CorsPolicy();
     private Links links = new Links();
     private List<Prompt> prompts = Arrays.asList(
         new Prompt("username", "text", "Email"),
@@ -33,11 +35,22 @@ public class IdentityZoneConfiguration {
         new Prompt("passcode", "password", "One Time Code (Get on at /passcode)")
     );
     private boolean idpDiscoveryEnabled = false;
+    private BrandingInformation branding;
+    private boolean accountChooserEnabled;
+    private UserConfig userConfig = new UserConfig();
 
     public IdentityZoneConfiguration() {}
 
     public IdentityZoneConfiguration(TokenPolicy tokenPolicy) {
         this.tokenPolicy = tokenPolicy;
+    }
+
+    public ClientSecretPolicy getClientSecretPolicy() {
+        return clientSecretPolicy;
+    }
+
+    public void setClientSecretPolicy(ClientSecretPolicy clientSecretPolicy) {
+        this.clientSecretPolicy = clientSecretPolicy;
     }
 
     public TokenPolicy getTokenPolicy() {
@@ -81,5 +94,36 @@ public class IdentityZoneConfiguration {
 
     public void setIdpDiscoveryEnabled(boolean idpDiscoveryEnabled) {
         this.idpDiscoveryEnabled = idpDiscoveryEnabled;
+    }
+
+    public BrandingInformation getBranding() {
+        return branding;
+    }
+
+    public void setBranding(BrandingInformation branding) {
+        this.branding = branding;
+    }
+
+    public void setAccountChooserEnabled(boolean accountChooserEnabled) {
+        this.accountChooserEnabled = accountChooserEnabled;
+    }
+    public CorsPolicy getCorsPolicy() {
+        return corsPolicy;
+    }
+
+    public IdentityZoneConfiguration setCorsPolicy(CorsPolicy corsPolicy) {
+        this.corsPolicy = corsPolicy;
+        return this;
+    }
+    public boolean isAccountChooserEnabled() {
+        return accountChooserEnabled;
+    }
+
+    public UserConfig getUserConfig() {
+        return userConfig;
+    }
+
+    public void setUserConfig(UserConfig userConfig) {
+        this.userConfig = userConfig;
     }
 }

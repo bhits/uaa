@@ -1,14 +1,20 @@
 package org.cloudfoundry.identity.uaa.authentication.manager;
 
+import org.cloudfoundry.identity.uaa.authentication.AccountNotPreCreatedException;
 import org.cloudfoundry.identity.uaa.authentication.UaaAuthentication;
 import org.cloudfoundry.identity.uaa.authentication.UaaAuthenticationDetails;
+import org.cloudfoundry.identity.uaa.authentication.UaaPrincipal;
 import org.cloudfoundry.identity.uaa.authentication.event.UserAuthenticationSuccessEvent;
+import org.cloudfoundry.identity.uaa.provider.ExternalIdentityProviderDefinition;
+import org.cloudfoundry.identity.uaa.provider.IdentityProvider;
+import org.cloudfoundry.identity.uaa.provider.IdentityProviderProvisioning;
 import org.cloudfoundry.identity.uaa.provider.ldap.ExtendedLdapUserDetails;
 import org.cloudfoundry.identity.uaa.provider.ldap.extension.ExtendedLdapUserImpl;
 import org.cloudfoundry.identity.uaa.user.Mailable;
 import org.cloudfoundry.identity.uaa.user.UaaUser;
 import org.cloudfoundry.identity.uaa.user.UaaUserDatabase;
 import org.cloudfoundry.identity.uaa.user.UaaUserPrototype;
+import org.cloudfoundry.identity.uaa.user.UserInfo;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -21,19 +27,31 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.ldap.userdetails.LdapUserDetails;
 import org.springframework.security.oauth2.common.util.RandomValueStringGenerator;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 
-import static org.hamcrest.CoreMatchers.not;
+import static org.cloudfoundry.identity.uaa.constants.OriginKeys.LDAP;
+import static org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants.ROLES;
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
+import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyObject;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -53,6 +71,9 @@ public class ExternalLoginAuthenticationManagerTest  {
     private UaaUser user;
     private String userId = new RandomValueStringGenerator().generate();
     private ArgumentCaptor<ApplicationEvent> userArgumentCaptor;
+    private IdentityProviderProvisioning providerProvisioning;
+    private MultiValueMap<String, String> userAttributes;
+    private List<String> externalGroups;
 
     private void mockUserDetails(UserDetails userDetails) {
         when(userDetails.getUsername()).thenReturn(userName);
@@ -69,6 +90,10 @@ public class ExternalLoginAuthenticationManagerTest  {
         userDetails = mock(UserDetails.class);
         mockUserDetails(userDetails);
         mockUaaWithUser();
+        userAttributes = new LinkedMultiValueMap<>();
+        userAttributes.put("1", Arrays.asList("1"));
+        userAttributes.put("2", Arrays.asList("2", "3"));
+        externalGroups = Arrays.asList("role1", "role2", "role3");
     }
 
     private void mockUaaWithUser() {
@@ -81,7 +106,7 @@ public class ExternalLoginAuthenticationManagerTest  {
         inputAuth = mock(Authentication.class);
         when(inputAuth.getPrincipal()).thenReturn(userDetails);
 
-        manager = new ExternalLoginAuthenticationManager();
+        manager = new ExternalLoginAuthenticationManager(null);
         setupManager();
     }
 
@@ -102,6 +127,8 @@ public class ExternalLoginAuthenticationManagerTest  {
         manager.setBeanName(beanName);
         manager.setApplicationEventPublisher(applicationEventPublisher);
         manager.setUserDatabase(uaaUserDatabase);
+        providerProvisioning = mock(IdentityProviderProvisioning.class);
+        manager.setProviderProvisioning(providerProvisioning);
     }
 
     @Test
@@ -255,12 +282,13 @@ public class ExternalLoginAuthenticationManagerTest  {
     @Test
     public void testAuthenticateLdapUserDetailsPrincipal() throws Exception {
         String dn = "cn="+userName+",ou=Users,dc=test,dc=com";
-        String origin = "ldap";
+        String origin = LDAP;
         LdapUserDetails ldapUserDetails = mock(LdapUserDetails.class);
         mockUserDetails(ldapUserDetails);
         when(ldapUserDetails.getDn()).thenReturn(dn);
-        manager = new LdapLoginAuthenticationManager();
+        manager = new LdapLoginAuthenticationManager(null);
         setupManager();
+        manager.setProviderProvisioning(null);
         manager.setOrigin(origin);
         when(user.getOrigin()).thenReturn(origin);
         when(uaaUserDatabase.retrieveUserByName(eq(userName), eq(origin))).thenReturn(user);
@@ -276,9 +304,38 @@ public class ExternalLoginAuthenticationManagerTest  {
     }
 
     @Test
+    public void testShadowUserCreationDisabled() throws Exception {
+        String dn = "cn="+userName+",ou=Users,dc=test,dc=com";
+        String origin = LDAP;
+        LdapUserDetails ldapUserDetails = mock(LdapUserDetails.class);
+        mockUserDetails(ldapUserDetails);
+        when(ldapUserDetails.getDn()).thenReturn(dn);
+        manager = new LdapLoginAuthenticationManager(null) {
+            @Override
+            protected boolean isAddNewShadowUser() {
+                return false;
+            }
+        };
+
+        setupManager();
+        manager.setOrigin(origin);
+        when(uaaUserDatabase.retrieveUserByName(eq(userName), eq(origin))).thenReturn(null);
+        when(inputAuth.getPrincipal()).thenReturn(ldapUserDetails);
+
+        try {
+            manager.authenticate(inputAuth);
+            fail("Expected authentication to fail with an exception.");
+        } catch (AccountNotPreCreatedException ex) {
+            assertThat(ex.getMessage(), containsString("user account must be pre-created"));
+        }
+
+        verify(applicationEventPublisher, times(0)).publishEvent(any());
+    }
+
+    @Test
     public void testAuthenticateCreateUserWithLdapUserDetailsPrincipal() throws Exception {
         String dn = "cn="+userName+",ou=Users,dc=test,dc=com";
-        String origin = "ldap";
+        String origin = LDAP;
         String email = "joe@test.org";
 
         LdapUserDetails baseLdapUserDetails = mock(LdapUserDetails.class);
@@ -290,8 +347,9 @@ public class ExternalLoginAuthenticationManagerTest  {
         ExtendedLdapUserImpl ldapUserDetails = new ExtendedLdapUserImpl(baseLdapUserDetails, ldapAttrs);
         ldapUserDetails.setMailAttributeName(ldapMailAttrName);
 
-        manager = new LdapLoginAuthenticationManager();
+        manager = new LdapLoginAuthenticationManager(null);
         setupManager();
+        manager.setProviderProvisioning(null);
         manager.setOrigin(origin);
         when(user.getEmail()).thenReturn(email);
         when(user.getOrigin()).thenReturn(origin);
@@ -318,11 +376,12 @@ public class ExternalLoginAuthenticationManagerTest  {
 
     @Test
     public void testAuthenticateCreateUserWithUserDetailsPrincipal() throws Exception {
-        String origin = "ldap";
+        String origin = LDAP;
 
-        manager = new LdapLoginAuthenticationManager();
+        manager = new LdapLoginAuthenticationManager(null);
         setupManager();
         manager.setOrigin(origin);
+        manager.setProviderProvisioning(null);
 
         when(user.getOrigin()).thenReturn(origin);
         when(uaaUserDatabase.retrieveUserByName(eq(userName),eq(origin)))
@@ -349,7 +408,7 @@ public class ExternalLoginAuthenticationManagerTest  {
     @Test
     public void testAuthenticateInvitedUserWithoutAcceptance() throws Exception {
         String username = "guyWhoDoesNotAcceptInvites";
-        String origin = "ldap";
+        String origin = LDAP;
         String email = "guy@ldap.org";
 
         UserDetails ldapUserDetails = mock(ExtendedLdapUserDetails.class, withSettings().extraInterfaces(Mailable.class));
@@ -368,8 +427,9 @@ public class ExternalLoginAuthenticationManagerTest  {
         UaaUser updatedUser = new UaaUser(new UaaUserPrototype().withUsername(username).withId(userId).withOrigin(origin).withEmail(email));
         when(invitedUser.modifyUsername(username)).thenReturn(updatedUser);
 
-        manager = new LdapLoginAuthenticationManager();
+        manager = new LdapLoginAuthenticationManager(null);
         setupManager();
+        manager.setProviderProvisioning(null);
         manager.setOrigin(origin);
 
         when(uaaUserDatabase.retrieveUserByName(eq(username),eq(origin)))
@@ -388,6 +448,47 @@ public class ExternalLoginAuthenticationManagerTest  {
         for(ApplicationEvent event : userArgumentCaptor.getAllValues()) {
             assertNotEquals(event.getClass(), NewUserAuthenticatedEvent.class);
         }
+    }
+
+    @Test
+    public void testPopulateAttributesStoresCustomAttributesAndRoles() {
+        manager = new LdapLoginAuthenticationManager(null);
+        setupManager();
+        manager.setOrigin(origin);
+        IdentityProvider provider = mock(IdentityProvider.class);
+        ExternalIdentityProviderDefinition providerDefinition = new ExternalIdentityProviderDefinition();
+        when(provider.getConfig()).thenReturn(providerDefinition);
+        when(providerProvisioning.retrieveByOrigin(eq(origin), anyString())).thenReturn(provider);
+        UaaAuthentication uaaAuthentication = mock(UaaAuthentication.class);
+        UaaPrincipal uaaPrincipal = mock(UaaPrincipal.class);
+        when(uaaPrincipal.getId()).thenReturn("id");
+        when(uaaAuthentication.getPrincipal()).thenReturn(uaaPrincipal);
+        when(uaaAuthentication.getUserAttributes()).thenReturn(userAttributes);
+        when(uaaAuthentication.getExternalGroups()).thenReturn(new HashSet<>(externalGroups));
+
+        providerDefinition.setStoreCustomAttributes(false);
+        manager.populateAuthenticationAttributes(uaaAuthentication, mock(Authentication.class), null);
+        verify(manager.getUserDatabase(), never()).storeUserInfo(anyString(), anyObject());
+
+        providerDefinition.setStoreCustomAttributes(true);
+        manager.populateAuthenticationAttributes(uaaAuthentication, mock(Authentication.class), null);
+        UserInfo userInfo = new UserInfo()
+            .setUserAttributes(userAttributes)
+            .setRoles(externalGroups);
+        verify(manager.getUserDatabase(), times(1)).storeUserInfo(eq("id"), eq(userInfo));
+
+        //null provider does not store it
+        reset(manager.getUserDatabase());
+        manager.setProviderProvisioning(null);
+        manager.populateAuthenticationAttributes(uaaAuthentication, mock(Authentication.class), null);
+        verify(manager.getUserDatabase(), never()).storeUserInfo(anyString(), anyObject());
+
+        manager.setProviderProvisioning(providerProvisioning);
+        //empty attributes does not store it
+        reset(manager.getUserDatabase());
+        userAttributes.clear();
+        manager.populateAuthenticationAttributes(uaaAuthentication, mock(Authentication.class), null);
+        verify(manager.getUserDatabase(), never()).storeUserInfo(anyString(), anyObject());
     }
 
     @Test

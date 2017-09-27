@@ -45,7 +45,20 @@ public class UaaAuthentication implements Authentication, Serializable {
     private long authenticatedTime = -1l;
     private long expiresAt = -1l;
     private Set<String> externalGroups;
-    private Map<String, List<String>> userAttributes;
+    private Set<String> authenticationMethods;
+    private Set<String> authContextClassRef;
+    private Long lastLoginSuccessTime;
+
+    private Map userAttributes;
+
+    public Long getLastLoginSuccessTime() {
+        return lastLoginSuccessTime;
+    }
+
+    public UaaAuthentication setLastLoginSuccessTime(Long lastLoginSuccessTime) {
+        this.lastLoginSuccessTime = lastLoginSuccessTime;
+        return this;
+    }
 
     //This is used when UAA acts as a SAML IdP
     @JsonIgnore
@@ -187,7 +200,7 @@ public class UaaAuthentication implements Authentication, Serializable {
     }
 
     public MultiValueMap<String,String> getUserAttributes() {
-        return new LinkedMultiValueMap<>(userAttributes!=null?userAttributes: EMPTY_MAP);
+        return new LinkedMultiValueMap<>(userAttributes!=null? userAttributes: EMPTY_MAP);
     }
 
     public Map<String,List<String>> getUserAttributesAsMap() {
@@ -211,4 +224,19 @@ public class UaaAuthentication implements Authentication, Serializable {
         this.samlMessageContext = samlMessageContext;
     }
 
+    public Set<String> getAuthenticationMethods() {
+        return authenticationMethods;
+    }
+
+    public void setAuthenticationMethods(Set<String> authenticationMethods) {
+        this.authenticationMethods = authenticationMethods;
+    }
+
+    public Set<String> getAuthContextClassRef() {
+        return authContextClassRef;
+    }
+
+    public void setAuthContextClassRef(Set<String> authContextClassRef) {
+        this.authContextClassRef = authContextClassRef;
+    }
 }

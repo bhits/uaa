@@ -14,7 +14,6 @@ import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.springframework.mock.web.MockHttpSession;
-import org.springframework.restdocs.payload.JsonFieldType;
 import org.springframework.restdocs.request.ParameterDescriptor;
 import org.springframework.restdocs.snippet.Snippet;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -28,6 +27,9 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import java.util.Arrays;
 
 import static org.cloudfoundry.identity.uaa.mock.util.MockMvcUtils.utils;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.ID_TOKEN_HINT_PROMPT;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.ID_TOKEN_HINT_PROMPT_NONE;
+import static org.cloudfoundry.identity.uaa.test.SnippetUtils.parameterWithName;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.isEmptyOrNullString;
 import static org.hamcrest.Matchers.not;
@@ -41,7 +43,6 @@ import static org.springframework.restdocs.mockmvc.RestDocumentationRequestBuild
 import static org.springframework.restdocs.payload.JsonFieldType.STRING;
 import static org.springframework.restdocs.payload.PayloadDocumentation.fieldWithPath;
 import static org.springframework.restdocs.payload.PayloadDocumentation.responseFields;
-import static org.springframework.restdocs.request.RequestDocumentation.parameterWithName;
 import static org.springframework.restdocs.request.RequestDocumentation.requestParameters;
 import static org.springframework.restdocs.snippet.Attributes.key;
 import static org.springframework.security.oauth2.common.util.OAuth2Utils.CLIENT_ID;
@@ -57,6 +58,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
     private final ParameterDescriptor clientIdParameter = parameterWithName(CLIENT_ID).description("a unique string representing the registration information provided by the client").attributes(key("constraints").value("Required"), key("type").value(STRING));
     private final ParameterDescriptor scopesParameter = parameterWithName(SCOPE).description("requested scopes, space-delimited").attributes(key("constraints").value("Optional"), key("type").value(STRING));
     private final ParameterDescriptor redirectParameter = parameterWithName(REDIRECT_URI).description("redirection URI to which the authorization server will send the user-agent back once access is granted (or denied), optional if pre-registered by the client").attributes(key("constraints").value("Optional"), key("type").value(STRING));
+    private final ParameterDescriptor promptParameter = parameterWithName(ID_TOKEN_HINT_PROMPT).description("specifies whether to prompt for user authentication. Only value `"+ID_TOKEN_HINT_PROMPT_NONE+"` is supported.").attributes(key("constraints").value("Optional"), key("type").value(STRING));
     private final ParameterDescriptor responseTypeParameter = parameterWithName(RESPONSE_TYPE).attributes(key("constraints").value("Required"), key("type").value(STRING));
 
     private UsernamePasswordAuthenticationToken principal;
@@ -64,7 +66,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
     @Before
     public void setUp() throws Exception {
         ScimUserProvisioning userProvisioning = getWebApplicationContext().getBean(JdbcScimUserProvisioning.class);
-        ScimUser marissa = userProvisioning.query("username eq \"marissa\" and origin eq \"uaa\"").get(0);
+        ScimUser marissa = userProvisioning.query("username eq \"marissa\" and origin eq \"uaa\"", IdentityZoneHolder.get().getId()).get(0);
         UaaPrincipal uaaPrincipal = new UaaPrincipal(marissa.getId(), marissa.getUserName(), marissa.getPrimaryEmail(), marissa.getOrigin(), marissa.getExternalId(), IdentityZoneHolder.get().getId());
         principal = new UsernamePasswordAuthenticationToken(uaaPrincipal, null, Arrays.asList(UaaAuthority.fromAuthorities("uaa.user")));
     }
@@ -83,11 +85,11 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .param(RESPONSE_TYPE, "code")
             .param(CLIENT_ID, "login")
             .param(SCOPE, "openid oauth.approvals")
-            .param(REDIRECT_URI, "http://redirect.to/app")
+            .param(REDIRECT_URI, "http://localhost/app")
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("either `code` for requesting an authorization code for an access token, as per OAuth spec"),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `code` for requesting an authorization code for an access token, as per OAuth spec"),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -116,7 +118,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("\"code\" for requesting an authorization code or \"token\" for an access token, as per OAuth spec"),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `code` for requesting an authorization code or `token` for an access token, as per OAuth spec"),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -151,11 +153,11 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .header("Authorization", "Bearer " + cfAccessToken)
             .param(RESPONSE_TYPE, "code")
             .param(CLIENT_ID, "login")
-            .param(REDIRECT_URI, "https://uaa.cloudfoundry.com/redirect/cf")
+            .param(REDIRECT_URI, "http://localhost/redirect/cf")
             .param(STATE, new RandomValueStringGenerator().generate());
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("`code` for requesting an authorization code for an access token, as per OAuth spec"),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `code` for requesting an authorization code for an access token, as per OAuth spec"),
             clientIdParameter,
             redirectParameter,
             parameterWithName(STATE).description("any random string to be returned in the Location header as a query parameter, used to achieve per-request customization").attributes(key("constraints").value("Required"), key("type").value(STRING))
@@ -185,7 +187,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("Expected response type, in this case \"token\", i.e. an access token"),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `token`, i.e. an access token"),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -200,6 +202,34 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
                 requestParameters)).andReturn();
         String location = mvcResult.getResponse().getHeader("Location");
         Assert.assertThat(location, containsString("access_token="));
+    }
+
+    @Test
+    public void implicitGrantWithPromptParameter_browserRequest() throws Exception {
+
+        MockHttpServletRequestBuilder get = get("/oauth/authorize")
+          .accept(APPLICATION_FORM_URLENCODED)
+          .param(RESPONSE_TYPE, "token")
+          .param(CLIENT_ID, "app")
+          .param(SCOPE, "openid")
+          .param(ID_TOKEN_HINT_PROMPT, ID_TOKEN_HINT_PROMPT_NONE)
+          .param(REDIRECT_URI, "http://localhost:8080/app/");
+
+        Snippet requestParameters = requestParameters(
+          responseTypeParameter.description("Space-delimited list of response types. Here, `token`, i.e. an access token"),
+          clientIdParameter,
+          scopesParameter,
+          redirectParameter,
+          promptParameter
+        );
+
+        Snippet responseHeaders = responseHeaders(headerWithName("Location").description("Redirect url specified in the request parameters."));
+
+        getMockMvc().perform(get)
+          .andExpect(status().isFound())
+          .andDo(document("{ClassName}/{methodName}",
+            responseHeaders,
+            requestParameters)).andReturn();
     }
 
     @Test
@@ -219,7 +249,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("Expected response type, in this case \"id_token\""),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `id_token`"),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -254,7 +284,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("Expected response type, in this case \"token id_token\", indicating both an access token and an ID token."),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `token id_token`, indicating both an access token and an ID token."),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -290,7 +320,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("Expected response type, in this case \"id_token code\", indicating a request for an ID token and an authorization code."),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `id_token code`, indicating a request for an ID token and an authorization code."),
             clientIdParameter,
             scopesParameter,
             redirectParameter
@@ -327,7 +357,7 @@ public class AuthorizeEndpointDocs extends InjectedMockContextTest {
             .session(session);
 
         Snippet requestParameters = requestParameters(
-            responseTypeParameter.description("Expected response type, in this case \"token id_token code\", indicating a request for an (implicitly granted) access token, an ID token, and an authorization code."),
+            responseTypeParameter.description("Space-delimited list of response types. Here, `token id_token code`, indicating a request for an (implicitly granted) access token, an ID token, and an authorization code."),
             clientIdParameter,
             scopesParameter,
             redirectParameter

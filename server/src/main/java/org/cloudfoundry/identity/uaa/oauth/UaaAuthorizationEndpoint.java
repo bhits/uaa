@@ -13,7 +13,13 @@
 
 package org.cloudfoundry.identity.uaa.oauth;
 
+import org.cloudfoundry.identity.uaa.oauth.client.ClientConstants;
 import org.cloudfoundry.identity.uaa.oauth.token.CompositeAccessToken;
+import org.cloudfoundry.identity.uaa.util.UaaHttpRequestUtils;
+import org.cloudfoundry.identity.uaa.util.UaaUrlUtils;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.InsufficientAuthenticationException;
@@ -48,6 +54,7 @@ import org.springframework.security.oauth2.provider.endpoint.DefaultRedirectReso
 import org.springframework.security.oauth2.provider.endpoint.RedirectResolver;
 import org.springframework.security.oauth2.provider.implicit.ImplicitTokenRequest;
 import org.springframework.security.oauth2.provider.request.DefaultOAuth2RequestValidator;
+import org.springframework.security.web.util.UrlUtils;
 import org.springframework.stereotype.Controller;
 import org.springframework.util.StringUtils;
 import org.springframework.web.HttpSessionRequiredException;
@@ -66,6 +73,8 @@ import org.springframework.web.servlet.view.RedirectView;
 import org.springframework.web.util.UriComponentsBuilder;
 import org.springframework.web.util.UriUtils;
 
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import java.io.UnsupportedEncodingException;
 import java.security.Principal;
 import java.util.Arrays;
@@ -123,8 +132,21 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
 
     private static final List<String> supported_response_types = Arrays.asList("code", "token", "id_token");
     @RequestMapping(value = "/oauth/authorize")
-    public ModelAndView authorize(Map<String, Object> model, @RequestParam Map<String, String> parameters,
-                                  SessionStatus sessionStatus, Principal principal) {
+    public ModelAndView authorize(Map<String, Object> model,
+                                  @RequestParam Map<String, String> parameters,
+                                  SessionStatus sessionStatus,
+                                  Principal principal,
+                                  HttpServletRequest request) {
+
+        ClientDetails client;
+        String clientId;
+        try {
+            clientId = parameters.get("client_id");
+            client = getClientServiceExtention().loadClientByClientId(clientId, IdentityZoneHolder.get().getId());
+        }
+        catch (NoSuchClientException x) {
+            throw new InvalidClientException(x.getMessage());
+        }
 
         // Pull out the authorization request first, using the OAuth2RequestFactory. All further logic should
         // query off of the authorization request instead of referring back to the parameters map. The contents of the
@@ -132,12 +154,12 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
         AuthorizationRequest authorizationRequest;
         try {
             authorizationRequest = getOAuth2RequestFactory().createAuthorizationRequest(parameters);
-        } catch (NoSuchClientException x) {
-            throw new InvalidClientException(x.getMessage());
+        } catch (DisallowedIdpException x) {
+            return switchIdp(model, client, clientId, request);
         }
 
         Set<String> responseTypes = authorizationRequest.getResponseTypes();
-        String grantType = getGrantType(responseTypes);
+        String grantType = deriveGrantTypeFromResponseType(responseTypes);
 
         if (!supported_response_types.containsAll(responseTypes)) {
             throw new UnsupportedResponseTypeException("Unsupported response types: " + responseTypes);
@@ -148,30 +170,27 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
         }
 
         try {
-
-            if (!(principal instanceof Authentication) || !((Authentication) principal).isAuthenticated()) {
-                throw new InsufficientAuthenticationException(
-                    "User must be authenticated with Spring Security before authorization can be completed.");
-            }
-
-            ClientDetails client = getClientDetailsService().loadClientByClientId(authorizationRequest.getClientId());
-
-            // The resolved redirect URI is either the redirect_uri from the parameters or the one from
-            // clientDetails. Either way we need to store it on the AuthorizationRequest.
             String redirectUriParameter = authorizationRequest.getRequestParameters().get(OAuth2Utils.REDIRECT_URI);
             String resolvedRedirect;
             try {
                 resolvedRedirect = redirectResolver.resolveRedirect(redirectUriParameter, client);
             } catch (RedirectMismatchException rme) {
                 throw new RedirectMismatchException(
-                    "Invalid redirect " + redirectUriParameter + " did not match one of the registered values");
+                  "Invalid redirect " + redirectUriParameter + " did not match one of the registered values");
             }
             if (!StringUtils.hasText(resolvedRedirect)) {
                 throw new RedirectMismatchException(
-                    "A redirectUri must be either supplied or preconfigured in the ClientDetails");
+                  "A redirectUri must be either supplied or preconfigured in the ClientDetails");
             }
-            authorizationRequest.setRedirectUri(resolvedRedirect);
 
+            boolean isAuthenticated = (principal instanceof Authentication) && ((Authentication) principal).isAuthenticated();
+
+            if (!isAuthenticated) {
+                throw new InsufficientAuthenticationException(
+                    "User must be authenticated with Spring Security before authorization can be completed.");
+            }
+
+            authorizationRequest.setRedirectUri(resolvedRedirect);
             // We intentionally only validate the parameters requested by the client (ignoring any data that may have
             // been added to the request by the manager).
             oauth2RequestValidator.validateScope(authorizationRequest, client);
@@ -204,18 +223,40 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
                 }
             }
 
-            // Place auth request into the model so that it is stored in the session
-            // for approveOrDeny to use. That way we make sure that auth request comes from the session,
-            // so any auth request parameters passed to approveOrDeny will be ignored and retrieved from the session.
-            model.put("authorizationRequest", authorizationRequest);
 
-            return getUserApprovalPageResponse(model, authorizationRequest, (Authentication) principal);
+            if ("none".equals(authorizationRequest.getRequestParameters().get("prompt"))){
+                return new ModelAndView(
+                    new RedirectView(UaaUrlUtils.addFragmentComponent(resolvedRedirect, "error=interaction_required"))
+                );
+            } else {
+                // Place auth request into the model so that it is stored in the session
+                // for approveOrDeny to use. That way we make sure that auth request comes from the session,
+                // so any auth request parameters passed to approveOrDeny will be ignored and retrieved from the session.
+                model.put("authorizationRequest", authorizationRequest);
+                model.put("original_uri", UrlUtils.buildFullRequestUrl(request));
+                return getUserApprovalPageResponse(model, authorizationRequest, (Authentication) principal);
+            }
 
         } catch (RuntimeException e) {
             sessionStatus.setComplete();
             throw e;
         }
 
+    }
+
+    private ModelAndView switchIdp(Map<String, Object> model, ClientDetails client, String clientId, HttpServletRequest request) {
+        Map<String, Object> additionalInfo = client.getAdditionalInformation();
+        String clientDisplayName = (String) additionalInfo.get(ClientConstants.CLIENT_NAME);
+        model.put("client_display_name", (clientDisplayName != null)? clientDisplayName : clientId);
+
+        String queryString = UaaHttpRequestUtils.paramsToQueryString(request.getParameterMap());
+        String redirectUri = request.getRequestURL() + "?" + queryString;
+        model.put("redirect", redirectUri);
+
+        model.put("error", "The application is not authorized for your account.");
+        model.put("error_message_code", "login.invalid_idp");
+
+        return new ModelAndView("switch_idp", model, HttpStatus.UNAUTHORIZED);
     }
 
     @RequestMapping(value = "/oauth/authorize", method = RequestMethod.POST, params = OAuth2Utils.USER_OAUTH_APPROVAL)
@@ -237,7 +278,7 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
 
         try {
             Set<String> responseTypes = authorizationRequest.getResponseTypes();
-            String grantType = getGrantType(responseTypes);
+            String grantType = deriveGrantTypeFromResponseType(responseTypes);
 
             authorizationRequest.setApprovalParameters(approvalParameters);
             authorizationRequest = userApprovalHandler.updateAfterApproval(authorizationRequest,
@@ -276,12 +317,13 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
 
     }
 
-    protected String getGrantType(Set<String> responseTypes) {
+    protected String deriveGrantTypeFromResponseType(Set<String> responseTypes) {
         if (responseTypes.contains("token")) {
             return "implicit";
-        } else {
-            return "authorization_code";
+        } else if (responseTypes.size() == 1 && responseTypes.contains("id_token")) {
+            return "implicit";
         }
+        return "authorization_code";
     }
 
     // We need explicit approval from the user.
@@ -343,8 +385,20 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
 
     private View getAuthorizationCodeResponse(AuthorizationRequest authorizationRequest, Authentication authUser) {
         try {
-            return new RedirectView(getSuccessfulRedirect(authorizationRequest,
-                generateCode(authorizationRequest, authUser)), false, true, false);
+            return new RedirectView(
+                getSuccessfulRedirect(
+                    authorizationRequest,
+                    generateCode(authorizationRequest, authUser)
+                ),
+                false,
+                false, //so that we send absolute URLs always
+                false
+            ) {
+                @Override
+                protected HttpStatus getHttp11StatusCode(HttpServletRequest request, HttpServletResponse response, String targetUrl) {
+                    return HttpStatus.FOUND; //Override code, defaults to 303
+                }
+            };
         } catch (OAuth2Exception e) {
             return new RedirectView(getUnsuccessfulRedirect(authorizationRequest, e, false), false, true, false);
         }
@@ -562,8 +616,10 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
         try {
             authorizationRequest = getAuthorizationRequestForError(webRequest);
             String requestedRedirectParam = authorizationRequest.getRequestParameters().get(OAuth2Utils.REDIRECT_URI);
-            String requestedRedirect = redirectResolver.resolveRedirect(requestedRedirectParam,
-                getClientDetailsService().loadClientByClientId(authorizationRequest.getClientId()));
+            String requestedRedirect =
+                redirectResolver.resolveRedirect(
+                    requestedRedirectParam,
+                getClientServiceExtention().loadClientByClientId(authorizationRequest.getClientId(), IdentityZoneHolder.get().getId()));
             authorizationRequest.setRedirectUri(requestedRedirect);
             String redirect = getUnsuccessfulRedirect(authorizationRequest, translate.getBody(), authorizationRequest
                 .getResponseTypes().contains("token"));
@@ -601,5 +657,14 @@ public class UaaAuthorizationEndpoint extends AbstractEndpoint {
             return getDefaultOAuth2RequestFactory().createAuthorizationRequest(parameters);
         }
 
+    }
+
+    protected ClientServicesExtension getClientServiceExtention() {
+        return (ClientServicesExtension )super.getClientDetailsService();
+    }
+
+
+    public void setClientDetailsService(ClientServicesExtension clientDetailsService) {
+        super.setClientDetailsService(clientDetailsService);
     }
 }

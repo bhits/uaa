@@ -13,13 +13,17 @@
 package org.cloudfoundry.identity.uaa.account;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.cloudfoundry.identity.uaa.codestore.ExpiringCode;
 import org.cloudfoundry.identity.uaa.scim.ScimUser;
-import org.cloudfoundry.identity.uaa.scim.exception.InvalidPasswordException;
 
 public interface ResetPasswordService {
-    ForgotPasswordInfo forgotPassword(String email, String clientId, String redirectUri);
+    void resetUserPassword(String userId, String password);
 
-    ResetPasswordResponse resetPassword(String code, String password) throws InvalidPasswordException;
+    ForgotPasswordInfo forgotPassword(String username, String clientId, String redirectUri);
+
+    ResetPasswordResponse resetPassword(ExpiringCode code, String newPassword);
+
+    void updateLastLogonTime(String userId);
 
     class ResetPasswordResponse {
         @JsonProperty("user")

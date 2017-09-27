@@ -10,8 +10,8 @@ import org.cloudfoundry.identity.uaa.mock.util.MockMvcUtils;
 import org.cloudfoundry.identity.uaa.scim.ScimUser;
 import org.cloudfoundry.identity.uaa.scim.endpoints.PasswordChange;
 import org.cloudfoundry.identity.uaa.scim.test.JsonObjectMatcherUtils;
-import org.cloudfoundry.identity.uaa.test.TestClient;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -46,7 +46,6 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
     public static final String ERROR_TEXT = "internal_user_management_disabled";
     public static final String MESSAGE_TEXT = "Internal User Creation is currently disabled. External User Store is in use.";
 
-    private TestClient testClient;
     private String token;
 
     ExpiringCodeStore codeStore = null;
@@ -55,7 +54,6 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
     public void setUp() throws Exception {
         codeStore = (ExpiringCodeStore)this.getWebApplicationContext().getBean("codeStore");
 
-        testClient = new TestClient(getMockMvc());
         token = testClient.getClientCredentialsOAuthAccessToken(
             "login",
             "loginsecret",
@@ -63,7 +61,7 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
         MockMvcUtils.setDisableInternalUserManagement(false, getWebApplicationContext());
     }
 
@@ -186,8 +184,7 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
 
     @Test
     public void userEndpointGetUsersAllowed() throws Exception {
-        TestClient adminClient = new TestClient(getMockMvc());
-        String adminToken = adminClient.getClientCredentialsOAuthAccessToken(
+        String adminToken = testClient.getClientCredentialsOAuthAccessToken(
             "admin",
             "adminsecret",
             "scim.read");
@@ -352,7 +349,7 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
     @Test
     public void changePasswordControllerChangePasswordPageNotAllowed() throws Exception {
         MockMvcUtils.setDisableInternalUserManagement(false, getWebApplicationContext());
-        
+
         ResultActions result = createUser();
         ScimUser createdUser = JsonUtils.readValue(result.andReturn().getResponse().getContentAsString(), ScimUser.class);
         MockMvcUtils.setDisableInternalUserManagement(true, getWebApplicationContext());
@@ -479,7 +476,7 @@ public class DisableUserManagementSecurityFilterMockMvcTest extends InjectedMock
 
     private ExpiringCode getExpiringCode(Object data) {
         Timestamp fiveMinutes = new Timestamp(System.currentTimeMillis()+(1000*60*5));
-        return codeStore.generateCode(JsonUtils.writeValueAsString(data), fiveMinutes, null);
+        return codeStore.generateCode(JsonUtils.writeValueAsString(data), fiveMinutes, null, IdentityZoneHolder.get().getId());
     }
 
     private CookieCsrfPostProcessor cookieCsrf() {

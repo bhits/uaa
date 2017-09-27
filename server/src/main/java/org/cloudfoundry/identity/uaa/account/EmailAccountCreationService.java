@@ -15,10 +15,10 @@ import org.cloudfoundry.identity.uaa.scim.exception.ScimResourceAlreadyExistsExc
 import org.cloudfoundry.identity.uaa.scim.util.ScimUtils;
 import org.cloudfoundry.identity.uaa.scim.validate.PasswordValidator;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.provider.ClientDetails;
-import org.springframework.security.oauth2.provider.ClientDetailsService;
 import org.springframework.security.oauth2.provider.NoSuchClientException;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.HttpClientErrorException;
@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.cloudfoundry.identity.uaa.codestore.ExpiringCodeType.REGISTRATION;
@@ -46,17 +47,16 @@ public class EmailAccountCreationService implements AccountCreationService {
     private final MessageService messageService;
     private final ExpiringCodeStore codeStore;
     private final ScimUserProvisioning scimUserProvisioning;
-    private final ClientDetailsService clientDetailsService;
+    private final ClientServicesExtension clientDetailsService;
     private final PasswordValidator passwordValidator;
-    private final String companyName;
 
     public EmailAccountCreationService(
             SpringTemplateEngine templateEngine,
             MessageService messageService,
             ExpiringCodeStore codeStore,
             ScimUserProvisioning scimUserProvisioning,
-            ClientDetailsService clientDetailsService,
-            PasswordValidator passwordValidator, String companyName) {
+            ClientServicesExtension clientDetailsService,
+            PasswordValidator passwordValidator) {
 
         this.templateEngine = templateEngine;
         this.messageService = messageService;
@@ -64,7 +64,6 @@ public class EmailAccountCreationService implements AccountCreationService {
         this.scimUserProvisioning = scimUserProvisioning;
         this.clientDetailsService = clientDetailsService;
         this.passwordValidator = passwordValidator;
-        this.companyName = companyName;
     }
 
     @Override
@@ -76,7 +75,7 @@ public class EmailAccountCreationService implements AccountCreationService {
             ScimUser scimUser = createUser(email, password, OriginKeys.UAA);
             generateAndSendCode(email, clientId, subject, scimUser.getId(), redirectUri);
         } catch (ScimResourceAlreadyExistsException e) {
-            List<ScimUser> users = scimUserProvisioning.query("userName eq \""+email+"\" and origin eq \""+ OriginKeys.UAA+"\"");
+            List<ScimUser> users = scimUserProvisioning.query("userName eq \""+email+"\" and origin eq \""+ OriginKeys.UAA+"\"", IdentityZoneHolder.get().getId());
             try {
                 if (users.size()>0) {
                     if (users.get(0).isVerified()) {
@@ -103,14 +102,14 @@ public class EmailAccountCreationService implements AccountCreationService {
 
     @Override
     public AccountCreationResponse completeActivation(String code) throws IOException {
-        ExpiringCode expiringCode = codeStore.retrieveCode(code);
+        ExpiringCode expiringCode = codeStore.retrieveCode(code, IdentityZoneHolder.get().getId());
         if ((null == expiringCode) || ((null != expiringCode.getIntent()) && !REGISTRATION.name().equals(expiringCode.getIntent()))) {
             throw new HttpClientErrorException(BAD_REQUEST);
         }
 
         Map<String, String> data = JsonUtils.readValue(expiringCode.getData(), new TypeReference<Map<String, String>>() {});
-        ScimUser user = scimUserProvisioning.retrieve(data.get("user_id"));
-        user = scimUserProvisioning.verifyUser(user.getId(), user.getVersion());
+        ScimUser user = scimUserProvisioning.retrieve(data.get("user_id"), IdentityZoneHolder.get().getId());
+        user = scimUserProvisioning.verifyUser(user.getId(), user.getVersion(), IdentityZoneHolder.get().getId());
 
         String clientId = data.get("client_id");
         String redirectUri = data.get("redirect_uri") != null ? data.get("redirect_uri") : "";
@@ -122,12 +121,12 @@ public class EmailAccountCreationService implements AccountCreationService {
     private String getRedirect(String clientId, String redirectUri) throws IOException {
         if (clientId != null) {
             try {
-                ClientDetails clientDetails = clientDetailsService.loadClientByClientId(clientId);
+                ClientDetails clientDetails = clientDetailsService.loadClientByClientId(clientId, IdentityZoneHolder.get().getId());
 
                 Set<String> registeredRedirectUris = clientDetails.getRegisteredRedirectUri() == null ? Collections.emptySet() :
                         clientDetails.getRegisteredRedirectUri();
                 String signupRedirectUrl = (String) clientDetails.getAdditionalInformation().get(SIGNUP_REDIRECT_URL);
-                String matchingRedirectUri = findMatchingRedirectUri(registeredRedirectUris, redirectUri, signupRedirectUrl);
+                String matchingRedirectUri = findMatchingRedirectUri(registeredRedirectUris, redirectUri, Optional.ofNullable(signupRedirectUrl).orElse("home"));
 
                 if (matchingRedirectUri != null) {
                     return matchingRedirectUri;
@@ -157,7 +156,7 @@ public class EmailAccountCreationService implements AccountCreationService {
         scimUser.setPassword(password);
         scimUser.setVerified(false);
         try {
-            ScimUser userResponse = scimUserProvisioning.createUser(scimUser, password);
+            ScimUser userResponse = scimUserProvisioning.createUser(scimUser, password, IdentityZoneHolder.get().getId());
             return userResponse;
         } catch (RuntimeException x) {
             if (x instanceof ScimResourceAlreadyExistsException) {
@@ -168,13 +167,14 @@ public class EmailAccountCreationService implements AccountCreationService {
     }
 
     private String getSubjectText() {
-        return StringUtils.hasText(companyName) && IdentityZoneHolder.isUaa() ?  "Activate your " + companyName + " account" : "Activate your account";
+        return StringUtils.hasText(IdentityZoneHolder.resolveBranding().getCompanyName()) && IdentityZoneHolder.isUaa() ?  "Activate your " + IdentityZoneHolder.resolveBranding().getCompanyName() + " account" : "Activate your account";
     }
 
     private String getEmailHtml(String code, String email) {
         String accountsUrl = ScimUtils.getVerificationURL(null).toString();
 
         final Context ctx = new Context();
+        String companyName = IdentityZoneHolder.resolveBranding().getCompanyName();
         if (IdentityZoneHolder.isUaa()) {
             ctx.setVariable("serviceName", StringUtils.hasText(companyName) ? companyName : "Cloud Foundry");
         } else {

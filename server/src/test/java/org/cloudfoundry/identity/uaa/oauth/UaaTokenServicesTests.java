@@ -15,62 +15,58 @@ package org.cloudfoundry.identity.uaa.oauth;
 import org.apache.commons.collections.map.HashedMap;
 import org.cloudfoundry.identity.uaa.approval.Approval;
 import org.cloudfoundry.identity.uaa.approval.Approval.ApprovalStatus;
-import org.cloudfoundry.identity.uaa.approval.ApprovalStore;
 import org.cloudfoundry.identity.uaa.audit.AuditEvent;
 import org.cloudfoundry.identity.uaa.audit.AuditEventType;
 import org.cloudfoundry.identity.uaa.audit.event.TokenIssuedEvent;
-import org.cloudfoundry.identity.uaa.authentication.UaaAuthentication;
 import org.cloudfoundry.identity.uaa.authentication.UaaPrincipal;
 import org.cloudfoundry.identity.uaa.constants.OriginKeys;
-import org.cloudfoundry.identity.uaa.oauth.approval.InMemoryApprovalStore;
-import org.cloudfoundry.identity.uaa.oauth.client.ClientConstants;
 import org.cloudfoundry.identity.uaa.oauth.jwt.Jwt;
-import org.cloudfoundry.identity.uaa.oauth.jwt.JwtHelper;
 import org.cloudfoundry.identity.uaa.oauth.token.ClaimConstants;
 import org.cloudfoundry.identity.uaa.oauth.token.CompositeAccessToken;
 import org.cloudfoundry.identity.uaa.oauth.token.RevocableToken;
 import org.cloudfoundry.identity.uaa.oauth.token.RevocableTokenProvisioning;
 import org.cloudfoundry.identity.uaa.oauth.token.TokenConstants;
+import org.cloudfoundry.identity.uaa.oauth.token.matchers.AbstractOAuth2AccessTokenMatchers;
 import org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2RefreshTokenMatchers;
-import org.cloudfoundry.identity.uaa.test.MockAuthentication;
-import org.cloudfoundry.identity.uaa.test.TestApplicationEventPublisher;
-import org.cloudfoundry.identity.uaa.user.InMemoryUaaUserDatabase;
-import org.cloudfoundry.identity.uaa.user.UaaAuthority;
 import org.cloudfoundry.identity.uaa.user.UaaUser;
 import org.cloudfoundry.identity.uaa.user.UaaUserPrototype;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
+import org.cloudfoundry.identity.uaa.zone.ClientServicesExtension;
 import org.cloudfoundry.identity.uaa.zone.IdentityZone;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneConfiguration;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
-import org.cloudfoundry.identity.uaa.zone.IdentityZoneProvisioning;
-import org.cloudfoundry.identity.uaa.zone.TokenPolicy;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
-import org.mockito.stubbing.Answer;
-import org.springframework.dao.EmptyResultDataAccessException;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.junit.rules.ExpectedException;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.mockito.ArgumentCaptor;
+import org.springframework.security.authentication.InternalAuthenticationServiceException;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.AuthorityUtils;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.jwt.crypto.sign.SignatureVerifier;
+import org.springframework.security.oauth2.common.DefaultExpiringOAuth2RefreshToken;
+import org.springframework.security.oauth2.common.DefaultOAuth2AccessToken;
 import org.springframework.security.oauth2.common.OAuth2AccessToken;
 import org.springframework.security.oauth2.common.OAuth2RefreshToken;
+import org.springframework.security.oauth2.common.exceptions.InsufficientScopeException;
 import org.springframework.security.oauth2.common.exceptions.InvalidGrantException;
 import org.springframework.security.oauth2.common.exceptions.InvalidScopeException;
 import org.springframework.security.oauth2.common.exceptions.InvalidTokenException;
 import org.springframework.security.oauth2.provider.AuthorizationRequest;
+import org.springframework.security.oauth2.provider.ClientDetails;
 import org.springframework.security.oauth2.provider.OAuth2Authentication;
-import org.springframework.security.oauth2.provider.OAuth2RequestFactory;
 import org.springframework.security.oauth2.provider.TokenRequest;
 import org.springframework.security.oauth2.provider.client.BaseClientDetails;
-import org.springframework.security.oauth2.provider.client.InMemoryClientDetailsService;
-import org.springframework.security.oauth2.provider.request.DefaultOAuth2RequestFactory;
+import org.springframework.util.ReflectionUtils;
 
+import java.lang.reflect.Field;
+import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -78,7 +74,31 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
 
+import static java.util.Collections.EMPTY_SET;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.singleton;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.AUTHORIZATION_CODE;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.CLIENT_AUTHORITIES;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.CLIENT_CREDENTIALS;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.CLIENT_ID;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.CLIENT_ID_NO_REFRESH_TOKEN_GRANT;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.GRANT_TYPE;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.IMPLICIT;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.ISSUER_URI;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.OPENID;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.PASSWORD;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.PROFILE;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.REFRESH_TOKEN;
+import static org.cloudfoundry.identity.uaa.oauth.TokenTestSupport.ROLES;
+import static org.cloudfoundry.identity.uaa.oauth.UaaTokenServices.UAA_REFRESH_TOKEN;
+import static org.cloudfoundry.identity.uaa.oauth.client.ClientConstants.REQUIRED_USER_GROUPS;
+import static org.cloudfoundry.identity.uaa.oauth.client.ClientDetailsModification.SECRET;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.OPAQUE;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.REQUEST_TOKEN_FORMAT;
+import static org.cloudfoundry.identity.uaa.oauth.token.TokenConstants.TokenFormat.JWT;
 import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTokenMatchers.audience;
 import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTokenMatchers.cid;
 import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTokenMatchers.clientId;
@@ -96,6 +116,7 @@ import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTok
 import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTokenMatchers.validFor;
 import static org.cloudfoundry.identity.uaa.oauth.token.matchers.OAuth2AccessTokenMatchers.zoneId;
 import static org.cloudfoundry.identity.uaa.user.UaaAuthority.USER_AUTHORITIES;
+import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.nullValue;
@@ -107,193 +128,221 @@ import static org.hamcrest.number.OrderingComparison.lessThanOrEqualTo;
 import static org.hamcrest.text.IsEmptyString.isEmptyString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.anyObject;
+import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
-/**
-* @author Filip Hanik
-* @author Joel D'sa
-*
-*/
+@RunWith(Parameterized.class)
 public class UaaTokenServicesTests {
 
-    public static final String CLIENT_ID = "client";
-    public static final String GRANT_TYPE = "grant_type";
-    public static final String PASSWORD = "password";
-    public static final String CLIENT_CREDENTIALS = "client_credentials";
-    public static final String AUTHORIZATION_CODE = "authorization_code";
-    public static final String REFRESH_TOKEN = "refresh_token";
-    public static final String AUTOAPPROVE = ClientConstants.AUTO_APPROVE;
-    public static final String IMPLICIT = "implicit";
-    public static final String CLIENT_AUTHORITIES = "read,update,write,openid";
-    public static final String CANNOT_READ_TOKEN_CLAIMS = "Cannot read token claims";
-    public static final String ISSUER_URI = "http://localhost:8080/uaa/oauth/token";
-    public static final String READ = "read";
-    public static final String WRITE = "write";
-    public static final String DELETE = "delete";
-    public static final String ALL_GRANTS_CSV = "authorization_code,password,implicit,client_credentials";
-    public static final String CLIENTS = "clients";
-    public static final String SCIM = "scim";
-    public static final String OPENID = "openid";
-    public static final String ROLES = "roles";
-    public static final String PROFILE = "profile";
 
-    private TestApplicationEventPublisher<TokenIssuedEvent> publisher;
-    private UaaTokenServices tokenServices = new UaaTokenServices();
+    private TestTokenEnhancer tokenEnhancer;
 
-    private final int accessTokenValidity = 60 * 60 * 12;
-    private final int refreshTokenValidity = 60 * 60 * 24 * 30;
+    @Rule
+    public ExpectedException expectedEx = ExpectedException.none();
 
-    private List<GrantedAuthority> defaultUserAuthorities = Arrays.asList(
-        UaaAuthority.authority("space.123.developer"),
-        UaaAuthority.authority("uaa.user"),
-        UaaAuthority.authority("space.345.developer"),
-        UaaAuthority.authority("space.123.admin"),
-        UaaAuthority.authority(OPENID),
-        UaaAuthority.authority(READ),
-        UaaAuthority.authority(WRITE));
+    private Set<String> thousandScopes;
+    private CompositeAccessToken persistToken;
+    private Date expiration;
 
-    private String userId = "12345";
-    private String username = "jdsa";
-    private String email = "jdsa@vmware.com";
-    private final String externalId = "externalId";
-    private UaaUser defaultUser =
-        new UaaUser(
-            new UaaUserPrototype()
-            .withId(userId)
-            .withUsername(username)
-            .withPassword(PASSWORD)
-            .withEmail(email)
-            .withAuthorities(defaultUserAuthorities)
-            .withGivenName("Marissa")
-            .withFamilyName("Bloggs")
-            .withPhoneNumber("1234567890")
-            .withCreated(new Date(System.currentTimeMillis() - 15000))
-            .withModified(new Date(System.currentTimeMillis() - 15000))
-            .withOrigin(OriginKeys.UAA)
-            .withExternalId(externalId)
-            .withVerified(false)
-            .withZoneId(IdentityZoneHolder.get().getId())
-            .withSalt(userId)
-            .withPasswordLastModified(new Date(System.currentTimeMillis() - 15000)));
-
-    // Need to create a user with a modified time slightly in the past because
-    // the token IAT is in seconds and the token
-    // expiry
-    // skew will not be long enough
-    private InMemoryUaaUserDatabase userDatabase = new InMemoryUaaUserDatabase(Collections.singleton(defaultUser));
-
-    private Authentication defaultUserAuthentication = new UsernamePasswordAuthenticationToken(new UaaPrincipal(defaultUser), "n/a", null);
-
-    private InMemoryClientDetailsService clientDetailsService = new InMemoryClientDetailsService();
-
-    private ApprovalStore approvalStore = new InMemoryApprovalStore();
-    private MockAuthentication mockAuthentication;
-    private List<String> requestedAuthScopes;
-    private List<String> clientScopes;
-    private List<String> readScope;
-    private List<String> writeScope;
-    private List<String> expandedScopes;
-    public List<String> resourceIds;
-    private String expectedJson;
-    private BaseClientDetails defaultClient;
-    private OAuth2RequestFactory requestFactory;
-    private TokenPolicy tokenPolicy;
+    private TokenTestSupport tokenSupport;
     private RevocableTokenProvisioning tokenProvisioning;
-    private final Map<String, RevocableToken> tokens = new HashMap<>();
+
+    private Calendar expiresAt = Calendar.getInstance();
+    private Calendar updatedAt = Calendar.getInstance();
 
 
-    public UaaTokenServicesTests() {
-        publisher = TestApplicationEventPublisher.forEventClass(TokenIssuedEvent.class);
+    public UaaTokenServicesTests(TestTokenEnhancer enhancer, String testname) {
+        this.tokenEnhancer = enhancer;
     }
+
+    @Parameterized.Parameters(name = "{index}: testname[{1}")
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {{null, "old behavior"}, {new TestTokenEnhancer(),"using enhancer"}});
+    }
+
+    private UaaTokenServices tokenServices;
 
     @Before
     public void setUp() throws Exception {
-        IdentityZoneHolder.clear();
-        IdentityZoneProvisioning provisioning = mock(IdentityZoneProvisioning.class);
-        IdentityZoneHolder.setProvisioning(provisioning);
-        IdentityZone zone = IdentityZone.getUaa();
-        IdentityZoneConfiguration config = new IdentityZoneConfiguration();
-        tokenPolicy = new TokenPolicy(accessTokenValidity, refreshTokenValidity);
-        Map<String, String> keys = new HashMap<>();
-        keys.put("testKey", "9c247h8yt978w3nv45y978w45hntv6");
-        keys.put("otherKey", "unc0uf98gv89egh4v98749978hv");
-        tokenPolicy.setKeys(keys);
-        tokenPolicy.setActiveKeyId("testKey");
-        config.setTokenPolicy(tokenPolicy);
-        zone.setConfig(config);
-        when(provisioning.retrieve("uaa")).thenReturn(zone);
+        tokenSupport = new TokenTestSupport(tokenEnhancer);
 
-        mockAuthentication = new MockAuthentication();
-        SecurityContextHolder.getContext().setAuthentication(mockAuthentication);
-        requestedAuthScopes = Arrays.asList(READ, WRITE,OPENID);
-        clientScopes = Arrays.asList(READ, WRITE,OPENID);
-        readScope = Arrays.asList(READ);
-        writeScope = Arrays.asList(WRITE);
-        expandedScopes = Arrays.asList(READ, WRITE, DELETE,OPENID);
-        resourceIds = Arrays.asList(SCIM, CLIENTS);
-        expectedJson = "[\""+READ+"\",\""+WRITE+"\",\""+OPENID+"\"]";
+        thousandScopes = new HashSet<>();
+        for (int i=0; i<1000; i++) {
+            thousandScopes.add(String.valueOf(i));
+        }
+        persistToken = new CompositeAccessToken("token-value");
+        expiration = new Date(System.currentTimeMillis() + 10000);
+        persistToken.setScope(thousandScopes);
+        persistToken.setExpiration(expiration);
 
+        tokenServices = tokenSupport.getUaaTokenServices();
+        tokenProvisioning = tokenSupport.getTokenProvisioning();
 
-        defaultClient = new BaseClientDetails(
-            CLIENT_ID,
-            SCIM+","+CLIENTS,
-            READ+","+WRITE+","+OPENID,
-            ALL_GRANTS_CSV,
-            CLIENT_AUTHORITIES);
-
-        clientDetailsService.setClientDetailsStore(
-            Collections.singletonMap(
-                CLIENT_ID,
-                defaultClient
-            )
-        );
-
-        tokenProvisioning = mock(RevocableTokenProvisioning.class);
-        when(tokenProvisioning.create(anyObject())).thenAnswer((Answer<RevocableToken>) invocation -> {
-            RevocableToken arg = (RevocableToken)invocation.getArguments()[0];
-            tokens.put(arg.getTokenId(), arg);
-            return arg;
-        });
-        when(tokenProvisioning.update(anyString(), anyObject())).thenAnswer((Answer<RevocableToken>) invocation -> {
-            String id = (String)invocation.getArguments()[0];
-            RevocableToken arg = (RevocableToken)invocation.getArguments()[1];
-            arg.setTokenId(id);
-            tokens.put(arg.getTokenId(), arg);
-            return arg;
-        });
-        when(tokenProvisioning.retrieve(anyString())).thenAnswer((Answer<RevocableToken>) invocation -> {
-            String id = (String)invocation.getArguments()[0];
-            RevocableToken result = tokens.get(id);
-            if (result==null) {
-                throw new EmptyResultDataAccessException(1);
-            }
-            return result;
-
-        });
-
-
-        requestFactory = new DefaultOAuth2RequestFactory(clientDetailsService);
-        tokenServices.setClientDetailsService(clientDetailsService);
-        tokenServices.setTokenPolicy(tokenPolicy);
-        tokenServices.setDefaultUserAuthorities(AuthorityUtils.authorityListToSet(USER_AUTHORITIES));
-        tokenServices.setIssuer("http://localhost:8080/uaa");
-        tokenServices.setUserDatabase(userDatabase);
-        tokenServices.setApprovalStore(approvalStore);
-        tokenServices.setApplicationEventPublisher(publisher);
-        tokenServices.setTokenProvisioning(tokenProvisioning);
-        tokenServices.afterPropertiesSet();
     }
 
     @After
     public void teardown() {
+        AbstractOAuth2AccessTokenMatchers.revocableTokens.remove();
         IdentityZoneHolder.clear();
-        tokens.clear();
+        tokenSupport.clear();
+    }
+
+    @Test
+    public void test_opaque_tokens_are_persisted() throws Exception {
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setJwtRevocable(false);
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenFormat(JWT.getStringValue());
+        CompositeAccessToken result = tokenServices.persistRevocableToken("id",
+                                                                          "rid",
+                                                                          persistToken,
+                                                                          new DefaultExpiringOAuth2RefreshToken("refresh-token-value", expiration),
+                                                                          "clientId",
+                                                                          "userId",
+                                                                          true,
+                                                                          true);
+
+        ArgumentCaptor<RevocableToken> rt = ArgumentCaptor.forClass(RevocableToken.class);
+        verify(tokenProvisioning, times(2)).create(rt.capture(), anyString());
+        assertNotNull(rt.getAllValues());
+        assertThat(rt.getAllValues().size(), equalTo(2));
+        assertNotNull(rt.getAllValues().get(0));
+        assertEquals(RevocableToken.TokenType.ACCESS_TOKEN, rt.getAllValues().get(0).getResponseType());
+        assertEquals(RevocableToken.TokenFormat.OPAQUE.name(), rt.getAllValues().get(0).getFormat());
+        assertEquals("id", result.getValue());
+        assertEquals(RevocableToken.TokenType.REFRESH_TOKEN, rt.getAllValues().get(1).getResponseType());
+        assertEquals(RevocableToken.TokenFormat.OPAQUE.name(), rt.getAllValues().get(1).getFormat());
+        assertEquals("rid", result.getRefreshToken().getValue());
+    }
+
+    @Test
+    public void test_refresh_tokens_are_uniquely_persisted() {
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenUnique(true);
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenFormat(TokenConstants.TokenFormat.OPAQUE.getStringValue());
+        tokenServices.persistRevocableToken("id",
+                "rid",
+                persistToken,
+                new DefaultExpiringOAuth2RefreshToken("refresh-token-value", expiration),
+                "clientId",
+                "userId",
+                true,
+                true);
+        ArgumentCaptor<RevocableToken> rt = ArgumentCaptor.forClass(RevocableToken.class);
+        verify(tokenProvisioning, times(1)).deleteRefreshTokensForClientAndUserId("clientId", "userId", IdentityZoneHolder.get().getId());
+        verify(tokenProvisioning, times(2)).create(rt.capture(), anyString());
+        RevocableToken refreshToken = rt.getAllValues().get(1);
+        assertEquals(RevocableToken.TokenType.REFRESH_TOKEN, refreshToken.getResponseType());
+    }
+
+    @Test
+    public void test_refresh_token_not_unique_when_set_to_false() {
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenUnique(false);
+        tokenServices.persistRevocableToken("id",
+                "rid",
+                persistToken,
+                new DefaultExpiringOAuth2RefreshToken("refresh-token-value", expiration),
+                "clientId",
+                "userId",
+                true,
+                true);
+        ArgumentCaptor<RevocableToken> rt = ArgumentCaptor.forClass(RevocableToken.class);
+        String currentZoneId = IdentityZoneHolder.get().getId();
+        verify(tokenProvisioning, times(0)).deleteRefreshTokensForClientAndUserId(anyString(), anyString(), eq(currentZoneId));
+        verify(tokenProvisioning, times(2)).create(rt.capture(), anyString());
+        RevocableToken refreshToken = rt.getAllValues().get(1);
+        assertEquals(RevocableToken.TokenType.REFRESH_TOKEN, refreshToken.getResponseType());
+    }
+
+    @Test
+    public void test_jwt_no_token_is_not_persisted() throws Exception {
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenFormat(JWT.getStringValue());
+        CompositeAccessToken result = tokenServices.persistRevocableToken("id",
+                                                                          "rid",
+                                                                          persistToken,
+                                                                          new DefaultExpiringOAuth2RefreshToken("refresh-token-value", expiration),
+                                                                          "clientId",
+                                                                          "userId",
+                                                                          false,
+                                                                          false);
+
+        ArgumentCaptor<RevocableToken> rt = ArgumentCaptor.forClass(RevocableToken.class);
+        verify(tokenProvisioning, never()).create(rt.capture(), anyString());
+        assertEquals(persistToken.getValue(), result.getValue());
+        assertEquals("refresh-token-value", result.getRefreshToken().getValue());
+    }
+
+    @Test
+    public void test_opaque_refresh_token_is_persisted() throws Exception {
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setRefreshTokenFormat(TokenConstants.TokenFormat.OPAQUE.getStringValue());
+        CompositeAccessToken result = tokenServices.persistRevocableToken("id",
+                                                                          "rid",
+                                                                          persistToken,
+                                                                          new DefaultExpiringOAuth2RefreshToken("refresh-token-value", expiration),
+                                                                          "clientId",
+                                                                          "userId",
+                                                                          false,
+                                                                          false);
+
+        ArgumentCaptor<RevocableToken> rt = ArgumentCaptor.forClass(RevocableToken.class);
+        verify(tokenProvisioning, times(1)).create(rt.capture(), anyString());
+        assertNotNull(rt.getAllValues());
+        assertEquals(1, rt.getAllValues().size());
+        assertEquals(RevocableToken.TokenType.REFRESH_TOKEN, rt.getAllValues().get(0).getResponseType());
+        assertEquals(RevocableToken.TokenFormat.OPAQUE.name(), rt.getAllValues().get(0).getFormat());
+        assertEquals("refresh-token-value", rt.getAllValues().get(0).getValue());
+        assertNotEquals("refresh-token-value", result.getRefreshToken().getValue());
+    }
+
+    @Test
+    public void null_issuer_should_fail() throws URISyntaxException {
+        tokenServices = new UaaTokenServices();
+        tokenServices.setClientDetailsService(mock(ClientServicesExtension.class));
+        try {
+            tokenServices.afterPropertiesSet();
+            fail();
+        } catch (IllegalArgumentException x) {
+            assertTrue(x.getMessage().contains("issuer must be set"));
+        }
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void do_not_allow_set_of_null_issuer() throws URISyntaxException {
+        tokenServices.setIssuer(null);
+    }
+
+    @Test(expected = URISyntaxException.class)
+    public void do_not_allow_set_of_non_url_issuer() throws URISyntaxException {
+        tokenServices.setIssuer("some bla bla bla");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void getTokenEndpoint_Fails_If_Issuer_Is_Wrong() throws Exception {
+        Field field = UaaTokenServices.class.getDeclaredField("issuer");
+        field.setAccessible(true);
+        ReflectionUtils.setField(field, tokenServices, "adasdas");
+        tokenServices.getTokenEndpoint();
+    }
+
+
+    @Test
+    public void is_opaque_token_required() {
+        tokenSupport.defaultClient.setAutoApproveScopes(singleton("true"));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResponseTypes(new HashSet(Arrays.asList(CompositeAccessToken.ID_TOKEN, "token")));
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, TokenConstants.GRANT_TYPE_USER_TOKEN);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+        assertTrue(tokenServices.opaqueTokenRequired(authentication));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -304,7 +353,7 @@ public class UaaTokenServicesTests {
     @Test(expected = InvalidGrantException.class)
     public void testInvalidGrantType() {
         AuthorizationRequest ar = mock(AuthorizationRequest.class);
-        tokenServices.refreshAccessToken("", requestFactory.createTokenRequest(ar,"dsdada"));
+        tokenServices.refreshAccessToken("", tokenSupport.requestFactory.createTokenRequest(ar,"dsdada"));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -312,14 +361,23 @@ public class UaaTokenServicesTests {
         Map<String,String> map = new HashMap<>();
         map.put("grant_type", "refresh_token");
         AuthorizationRequest authorizationRequest = new AuthorizationRequest(map,null,null,null,null,null,false,null,null,null);
-        tokenServices.refreshAccessToken("dasdasdasdasdas", requestFactory.createTokenRequest(authorizationRequest, "refresh_token"));
+        tokenServices.refreshAccessToken("dasdasdasdasdas", tokenSupport.requestFactory.createTokenRequest(authorizationRequest, "refresh_token"));
     }
+
+    @Test
+    public void misconfigured_keys_throws_proper_error() {
+        expectedEx.expect(InternalAuthenticationServiceException.class);
+        expectedEx.expectMessage("Unable to sign token, misconfigured JWT signing keys");
+        IdentityZoneHolder.get().getConfig().getTokenPolicy().setActiveKeyId("invalid");
+        performPasswordGrant(JWT.getStringValue());
+    }
+
 
     @Test
     public void testCreateAccessTokenForAClient() {
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,clientScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.clientScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, CLIENT_CREDENTIALS);
         authorizationRequest.setRequestParameters(azParameters);
@@ -329,21 +387,75 @@ public class UaaTokenServicesTests {
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
         assertCommonClientAccessTokenProperties(accessToken);
-        assertThat(accessToken, validFor(is(accessTokenValidity)));
+        assertThat(accessToken, validFor(is(tokenSupport.accessTokenValidity)));
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
         assertThat(accessToken, zoneId(is(IdentityZoneHolder.get().getId())));
         assertThat(accessToken.getRefreshToken(), is(nullValue()));
+        validateExternalAttributes(accessToken);
 
-        assertCommonEventProperties(accessToken, CLIENT_ID, expectedJson);
+        assertCommonEventProperties(accessToken, CLIENT_ID, tokenSupport.expectedJson);
     }
 
 
     @Test
-    public void testCreateOpaqueAccessTokenForAClient() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, clientScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+    public void test_refresh_token_is_opaque_when_requested() {
+        OAuth2AccessToken accessToken = performPasswordGrant(TokenConstants.TokenFormat.OPAQUE.getStringValue());
+        OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
+
+        String refreshTokenValue = accessToken.getRefreshToken().getValue();
+        assertThat("Token value should be equal to or lesser than 36 characters", refreshTokenValue.length(), lessThanOrEqualTo(36));
+        this.assertCommonUserRefreshTokenProperties(refreshToken);
+        assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
+        assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
+        TokenRequest refreshTokenRequest = getRefreshTokenRequest();
+
+        //validate both opaque and JWT refresh tokenSupport.tokens
+        for (String s : Arrays.asList(refreshTokenValue, tokenSupport.tokens.get(refreshTokenValue).getValue())) {
+            OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(s, refreshTokenRequest);
+            assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
+        }
+    }
+
+    @Test
+    public void test_using_opaque_parameter_on_refresh_grant() {
+        OAuth2AccessToken accessToken = performPasswordGrant(TokenConstants.TokenFormat.OPAQUE.getStringValue());
+        OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
+        String refreshTokenValue = refreshToken.getValue();
+
+        Map<String,String> parameters = new HashMap<>();
+        parameters.put(REQUEST_TOKEN_FORMAT, OPAQUE);
+        TokenRequest refreshTokenRequest = getRefreshTokenRequest(parameters);
+
+        //validate both opaque and JWT refresh tokenSupport.tokens
+        for (String s : Arrays.asList(refreshTokenValue, tokenSupport.tokens.get(refreshTokenValue).getValue())) {
+            OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(s, refreshTokenRequest);
+            assertThat("Token value should be equal to or lesser than 36 characters", refreshedAccessToken.getValue().length(), lessThanOrEqualTo(36));
+            assertCommonUserAccessTokenProperties(new DefaultOAuth2AccessToken(tokenSupport.tokens.get(refreshedAccessToken).getValue()), CLIENT_ID);
+        }
+    }
+
+    protected OAuth2AccessToken performPasswordGrant() {
+        return performPasswordGrant(JWT.getStringValue());
+    }
+    protected OAuth2AccessToken performPasswordGrant(String tokenFormat) {
+        AuthorizationRequest authorizationRequest =  new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
-        azParameters.put(TokenConstants.REQUEST_TOKEN_FORMAT, TokenConstants.OPAQUE);
+        azParameters.put(GRANT_TYPE, PASSWORD);
+        azParameters.put(REQUEST_TOKEN_FORMAT, tokenFormat);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+        return tokenServices.createAccessToken(authentication);
+    }
+
+    @Test
+    public void testCreateOpaqueAccessTokenForAClient() {
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.clientScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(REQUEST_TOKEN_FORMAT, TokenConstants.OPAQUE);
         azParameters.put(GRANT_TYPE, CLIENT_CREDENTIALS);
         authorizationRequest.setRequestParameters(azParameters);
 
@@ -366,9 +478,10 @@ public class UaaTokenServicesTests {
                 IdentityZoneConfiguration.class
             )
         );
+        tokenSupport.copyClients(IdentityZoneHolder.get().getId(), identityZone.getId());
         IdentityZoneHolder.set(identityZone);
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,clientScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.clientScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, CLIENT_CREDENTIALS);
         authorizationRequest.setRequestParameters(azParameters);
@@ -381,14 +494,16 @@ public class UaaTokenServicesTests {
         assertThat(accessToken, validFor(is(3600)));
         assertThat(accessToken, issuerUri(is("http://"+subdomain+".localhost:8080/uaa/oauth/token")));
         assertThat(accessToken.getRefreshToken(), is(nullValue()));
+        validateExternalAttributes(accessToken);
 
-        Assert.assertEquals(1, publisher.getEventCount());
+        Assert.assertEquals(1, tokenSupport.publisher.getEventCount());
 
-        this.assertCommonEventProperties(accessToken, CLIENT_ID, expectedJson);
+        this.assertCommonEventProperties(accessToken, CLIENT_ID, tokenSupport.expectedJson);
     }
 
     private IdentityZone getIdentityZone(String subdomain) {
         IdentityZone identityZone = new IdentityZone();
+        identityZone.setId(subdomain);
         identityZone.setSubdomain(subdomain);
         identityZone.setName("The Twiglet Zone");
         identityZone.setDescription("Like the Twilight Zone but tastier.");
@@ -397,135 +512,199 @@ public class UaaTokenServicesTests {
 
     @Test
     public void testCreateAccessTokenAuthcodeGrant() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
-        assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
-        assertThat(accessToken, validFor(is(60 * 60 * 12)));
+        validateAccessAndRefreshToken(accessToken);
+    }
 
-        OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
-        this.assertCommonUserRefreshTokenProperties(refreshToken);
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
+    @Test
+    public void testCreateAccessTokenOnlyForClientWithoutRefreshToken() {
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID_NO_REFRESH_TOKEN_GRANT,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+
+        validateAccessTokenOnly(accessToken, CLIENT_ID_NO_REFRESH_TOKEN_GRANT);
+        assertNull(accessToken.getRefreshToken());
     }
 
     @Test
     public void testCreateAccessTokenAuthcodeGrantSwitchedPrimaryKey() {
-        String originalPrimaryKeyId = tokenPolicy.getActiveKeyId();
+        String originalPrimaryKeyId = tokenSupport.tokenPolicy.getActiveKeyId();
         try {
-            tokenPolicy.setActiveKeyId("otherKey");
+            tokenSupport.tokenPolicy.setActiveKeyId("otherKey");
 
-            AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-            authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+            AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+            authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
             Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
             azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
             authorizationRequest.setRequestParameters(azParameters);
-            Authentication userAuthentication = defaultUserAuthentication;
+            Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
             OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
             OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-            this.assertCommonUserAccessTokenProperties(accessToken);
-            assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-            assertThat(accessToken, scope(is(requestedAuthScopes)));
-            assertThat(accessToken, validFor(is(60 * 60 * 12)));
-
-            OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
-            this.assertCommonUserRefreshTokenProperties(refreshToken);
-            assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
-            assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
-
-            this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+            validateAccessAndRefreshToken(accessToken);
         } finally {
-            tokenPolicy.setActiveKeyId(originalPrimaryKeyId);
+            tokenSupport.tokenPolicy.setActiveKeyId(originalPrimaryKeyId);
         }
     }
 
     @Test
     public void testCreateAccessTokenPasswordGrant() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, PASSWORD);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
-        assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
-        assertThat(accessToken, validFor(is(60 * 60 * 12)));
-
-        OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
-        this.assertCommonUserRefreshTokenProperties(refreshToken);
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
-
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        validateAccessAndRefreshToken(accessToken);
         tokenServices.loadAuthentication(accessToken.getValue());
 
         //ensure that we can load without user_name claim
-        tokenServices.setExcludedClaims(new HashSet(Arrays.asList(ClaimConstants.AUTHORITIES, ClaimConstants.USER_NAME)));
+        tokenServices.setExcludedClaims(new HashSet(Arrays.asList(ClaimConstants.AUTHORITIES, ClaimConstants.USER_NAME, ClaimConstants.EMAIL)));
         accessToken = tokenServices.createAccessToken(authentication);
+        assertNotNull(tokenServices.loadAuthentication(accessToken.getValue()).getUserAuthentication());
+    }
+
+    @Test
+    public void test_missing_required_user_groups() {
+
+        tokenSupport.defaultClient.addAdditionalInformation(REQUIRED_USER_GROUPS, Arrays.asList("uaa.admin"));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, PASSWORD);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+
+        expectedEx.expect(InvalidTokenException.class);
+        expectedEx.expectMessage("User does not meet the client's required group criteria.");
+        tokenServices.createAccessToken(authentication);
+    }
+
+
+
+    @Test
+    public void testClientSecret_Added_Token_Validation_Still_Works() {
+
+        tokenSupport.defaultClient.setClientSecret(SECRET);
+
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, PASSWORD);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+        //normal token validation
         tokenServices.loadAuthentication(accessToken.getValue());
+
+        //add a 2nd secret
+        tokenSupport.defaultClient.setClientSecret(tokenSupport.defaultClient.getClientSecret()+" newsecret");
+        tokenServices.loadAuthentication(accessToken.getValue());
+
+        //generate a token when we have two secrets
+        OAuth2AccessToken accessToken2 = tokenServices.createAccessToken(authentication);
+
+        //remove the 1st secret
+        tokenSupport.defaultClient.setClientSecret("newsecret");
+        try {
+            tokenServices.loadAuthentication(accessToken.getValue());
+            fail("Token should fail to validate on the revocation signature");
+        } catch (InvalidTokenException e) {
+            assertTrue(e.getMessage().contains("revocable signature mismatch"));
+        }
+        tokenServices.loadAuthentication(accessToken2.getValue());
+
+        OAuth2AccessToken accessToken3 = tokenServices.createAccessToken(authentication);
+        tokenServices.loadAuthentication(accessToken3.getValue());
     }
 
     @Test
     public void testCreateRevocableAccessTokenPasswordGrant() {
-        AuthorizationRequest authorizationRequest =  new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
-        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
-        azParameters.put(GRANT_TYPE, PASSWORD);
-        authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        OAuth2AccessToken accessToken = performPasswordGrant();
 
-        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
-        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+        validateAccessAndRefreshToken(accessToken);
+    }
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+    private void validateAccessTokenOnly(OAuth2AccessToken accessToken, String clientId) {
+        this.assertCommonUserAccessTokenProperties(accessToken, clientId);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
+        validateExternalAttributes(accessToken);
+    }
+
+    protected void validateAccessAndRefreshToken(OAuth2AccessToken accessToken) {
+        validateAccessTokenOnly(accessToken, CLIENT_ID);
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
         this.assertCommonUserRefreshTokenProperties(refreshToken);
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
+    }
+
+    protected void validateExternalAttributes(OAuth2AccessToken accessToken) {
+        Map<String, String> extendedAttributes = (Map<String, String>) accessToken.getAdditionalInformation().get(ClaimConstants.EXTERNAL_ATTR);
+        if (tokenEnhancer!=null) {
+            Assert.assertEquals("test", extendedAttributes.get("purpose"));
+        } else {
+            assertNull("External attributes should not exist", extendedAttributes);
+        }
     }
 
     @Test
     public void testCreateAccessTokenRefreshGrant() throws InterruptedException {
         OAuth2AccessToken accessToken = getOAuth2AccessToken();
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
-        Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
-        refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
-        refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
+        TokenRequest refreshTokenRequest = getRefreshTokenRequest();
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), refreshTokenRequest);
 
         assertEquals(refreshedAccessToken.getRefreshToken().getValue(), accessToken.getRefreshToken().getValue());
 
-        this.assertCommonUserAccessTokenProperties(refreshedAccessToken);
+        this.assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
         assertThat(refreshedAccessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(refreshedAccessToken, scope(is(requestedAuthScopes)));
+        assertThat(refreshedAccessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(refreshedAccessToken, validFor(is(60 * 60 * 12)));
+        validateExternalAttributes(accessToken);
+    }
+
+    protected TokenRequest getRefreshTokenRequest() {
+        return getRefreshTokenRequest(emptyMap());
+    }
+    protected TokenRequest getRefreshTokenRequest(Map<String, String> requestParameters) {
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        refreshAuthorizationRequest.setRequestParameters(requestParameters);
+        Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
+        refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
+        refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
+        return tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token");
     }
 
     @Test
@@ -538,60 +717,59 @@ public class UaaTokenServicesTests {
                 IdentityZoneConfiguration.class
             )
         );
+        tokenSupport.copyClients(IdentityZoneHolder.get().getId(), identityZone.getId());
         IdentityZoneHolder.set(identityZone);
 
         OAuth2AccessToken accessToken = getOAuth2AccessToken();
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
         assertEquals(refreshedAccessToken.getRefreshToken().getValue(), accessToken.getRefreshToken().getValue());
 
-        this.assertCommonUserAccessTokenProperties(refreshedAccessToken);
+        this.assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
         assertThat(refreshedAccessToken, issuerUri(is("http://test-zone-subdomain.localhost:8080/uaa/oauth/token")));
-        assertThat(refreshedAccessToken, scope(is(requestedAuthScopes)));
+        assertThat(refreshedAccessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(refreshedAccessToken, validFor(is(3600)));
+        validateExternalAttributes(accessToken);
     }
 
     private OAuth2AccessToken getOAuth2AccessToken() {
-        Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 300000);
-
-        Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-                                      .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+                                      .setUserId(tokenSupport.userId)
                                       .setClientId(CLIENT_ID)
                                       .setScope(OPENID)
                                       .setExpiresAt(expiresAt.getTime())
                                       .setStatus(ApprovalStatus.APPROVED)
-                                      .setLastUpdatedAt(updatedAt.getTime()));
+                                      .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         return tokenServices.createAccessToken(authentication);
@@ -599,25 +777,28 @@ public class UaaTokenServicesTests {
 
     @Test
     public void testCreateAccessTokenRefreshGrantAllScopesAutoApproved() throws InterruptedException {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
-        clientDetails.addAdditionalInformation(AUTOAPPROVE, "true");
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
+        clientDetails.setAutoApproveScopes(singleton("true"));
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
         // NO APPROVALS REQUIRED
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
@@ -625,47 +806,50 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
 
         assertEquals(refreshedAccessToken.getRefreshToken().getValue(), accessToken.getRefreshToken().getValue());
 
-        this.assertCommonUserAccessTokenProperties(refreshedAccessToken);
+        this.assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
         assertThat(refreshedAccessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(refreshedAccessToken, scope(is(requestedAuthScopes)));
+        assertThat(refreshedAccessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(refreshedAccessToken, validFor(is(60 * 60 * 12)));
         assertThat(accessToken.getRefreshToken(), is(not(nullValue())));
     }
 
     @Test
     public void testCreateAccessTokenRefreshGrantSomeScopesAutoApprovedDowngradedRequest() throws InterruptedException {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
-        clientDetails.addAdditionalInformation(AUTOAPPROVE, Boolean.TRUE.toString());
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
+        clientDetails.setAutoApproveScopes(singleton("true"));
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
         // NO APPROVALS REQUIRED
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
 
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
@@ -673,19 +857,19 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,readScope);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.readScope);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
 
         assertEquals(refreshedAccessToken.getRefreshToken().getValue(), accessToken.getRefreshToken().getValue());
 
-        this.assertCommonUserAccessTokenProperties(refreshedAccessToken);
+        this.assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
         assertThat(refreshedAccessToken, issuerUri(is(ISSUER_URI)));
         assertThat(refreshedAccessToken, validFor(is(60 * 60 * 12)));
         assertThat(accessToken.getRefreshToken(), is(not(nullValue())));
@@ -693,9 +877,12 @@ public class UaaTokenServicesTests {
 
     @Test
     public void testCreateAccessTokenRefreshGrantSomeScopesAutoApproved() throws InterruptedException {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
-        clientDetails.addAdditionalInformation(AUTOAPPROVE, readScope);
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
+        clientDetails.setAutoApproveScopes(tokenSupport.readScope);
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
@@ -703,35 +890,35 @@ public class UaaTokenServicesTests {
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
-        approvalStore.addApproval(new Approval()
-                                      .setUserId(userId)
-                                      .setClientId(CLIENT_ID)
-                                      .setScope(OPENID)
-                                      .setExpiresAt(expiresAt.getTime())
-                                      .setStatus(ApprovalStatus.APPROVED)
-                                      .setLastUpdatedAt(updatedAt.getTime()));
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
+            .setClientId(CLIENT_ID)
+            .setScope(OPENID)
+            .setExpiresAt(expiresAt.getTime())
+            .setStatus(ApprovalStatus.APPROVED)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
@@ -739,19 +926,19 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
 
         assertEquals(refreshedAccessToken.getRefreshToken().getValue(), accessToken.getRefreshToken().getValue());
 
-        this.assertCommonUserAccessTokenProperties(refreshedAccessToken);
+        this.assertCommonUserAccessTokenProperties(refreshedAccessToken, CLIENT_ID);
         assertThat(refreshedAccessToken, issuerUri(is(ISSUER_URI)));
         assertThat(refreshedAccessToken, validFor(is(60 * 60 * 12)));
         assertThat(accessToken.getRefreshToken(), is(not(nullValue())));
@@ -759,9 +946,12 @@ public class UaaTokenServicesTests {
 
     @Test(expected = InvalidTokenException.class)
     public void testCreateAccessTokenRefreshGrantNoScopesAutoApprovedIncompleteApprovals() throws InterruptedException {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
-        clientDetails.addAdditionalInformation(AUTOAPPROVE, Arrays.asList());
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
+        clientDetails.setAutoApproveScopes(Arrays.asList());
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
@@ -769,27 +959,27 @@ public class UaaTokenServicesTests {
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
@@ -797,22 +987,25 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token"));
     }
 
     @Test
     public void testCreateAccessTokenRefreshGrantAllScopesAutoApprovedButApprovalDenied() throws InterruptedException {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
-        clientDetails.addAdditionalInformation(AUTOAPPROVE, requestedAuthScopes);
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
+        clientDetails.setAutoApproveScopes(tokenSupport.requestedAuthScopes);
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
@@ -820,34 +1013,34 @@ public class UaaTokenServicesTests {
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.DENIED)
-            .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
@@ -855,42 +1048,68 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken refreshedAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
         assertNotNull(refreshedAccessToken);
     }
 
     @Test
+    public void refreshTokenNotCreatedIfGrantTypeRestricted() {
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
+        authorizationRequest.setRequestParameters(azParameters);
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), tokenSupport.defaultUserAuthentication);
+        tokenServices.setRestrictRefreshGrant(true);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+
+        assertThat(accessToken.getRefreshToken(), is(nullValue()));
+    }
+
+    @Test
     public void testCreateAccessTokenImplicitGrant() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, IMPLICIT);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
         assertThat(accessToken.getRefreshToken(), is(nullValue()));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
     }
 
     @Test
     public void create_id_token_with_roles_scope() {
+        Jwt idTokenJwt = getIdToken(Arrays.asList(OPENID));
+        assertTrue(idTokenJwt.getClaims().contains("\"amr\":[\"ext\",\"rba\",\"mfa\"]"));
+    }
+
+    @Test
+    public void create_id_token_with_amr_claim() throws Exception {
         Jwt idTokenJwt = getIdToken(Arrays.asList(OPENID, ROLES));
-        assertTrue(idTokenJwt.getClaims().contains("\"roles\":[\"group2\",\"group1\"]"));
+        assertTrue(idTokenJwt.getClaims().contains("\"amr\":[\"ext\",\"rba\",\"mfa\"]"));
+    }
+
+    @Test
+    public void create_id_token_with_acr_claim() throws Exception {
+        Jwt idTokenJwt = getIdToken(Arrays.asList(OPENID, ROLES));
+        assertTrue(idTokenJwt.getClaims().contains("\"" + ClaimConstants.ACR + "\":{\"values\":[\""));
     }
 
     @Test
@@ -902,9 +1121,9 @@ public class UaaTokenServicesTests {
     @Test
     public void create_id_token_with_profile_scope() throws Exception {
         Jwt idTokenJwt = getIdToken(Arrays.asList(OPENID, PROFILE));
-        assertTrue(idTokenJwt.getClaims().contains("\"given_name\":\"" + defaultUser.getGivenName() + "\""));
-        assertTrue(idTokenJwt.getClaims().contains("\"family_name\":\"" + defaultUser.getFamilyName() + "\""));
-        assertTrue(idTokenJwt.getClaims().contains("\"phone_number\":\"" + defaultUser.getPhoneNumber() + "\""));
+        assertTrue(idTokenJwt.getClaims().contains("\"given_name\":\"" + tokenSupport.defaultUser.getGivenName() + "\""));
+        assertTrue(idTokenJwt.getClaims().contains("\"family_name\":\"" + tokenSupport.defaultUser.getFamilyName() + "\""));
+        assertTrue(idTokenJwt.getClaims().contains("\"phone_number\":\"" + tokenSupport.defaultUser.getPhoneNumber() + "\""));
     }
 
     @Test
@@ -915,48 +1134,36 @@ public class UaaTokenServicesTests {
         assertFalse(idTokenJwt.getClaims().contains("\"phone_number\":"));
     }
 
+    @Test
+    public void create_id_token_with_last_logon_time_claim() {
+        Jwt idTokenJwt = getIdToken(Arrays.asList(OPENID));
+        assertTrue(idTokenJwt.getClaims().contains("\"previous_logon_time\":12365"));
+    }
+
     private Jwt getIdToken(List<String> scopes) {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, scopes);
-
-        authorizationRequest.setResponseTypes(new HashSet<>(Arrays.asList(CompositeAccessToken.ID_TOKEN)));
-
-        UaaPrincipal uaaPrincipal = new UaaPrincipal(defaultUser.getId(), defaultUser.getUsername(), defaultUser.getEmail(), defaultUser.getOrigin(), defaultUser.getExternalId(), defaultUser.getZoneId());
-        UaaAuthentication userAuthentication = new UaaAuthentication(uaaPrincipal, null, defaultUserAuthorities, new HashSet<>(Arrays.asList("group1", "group2")),Collections.EMPTY_MAP, null, true, System.currentTimeMillis(), System.currentTimeMillis() + 1000l * 60l);
-
-        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
-
-        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
-
-        Jwt tokenJwt = JwtHelper.decode(accessToken.getValue());
-        SignatureVerifier verifier = KeyInfo.getKey(tokenJwt.getHeader().getKid()).getVerifier();
-        tokenJwt.verifySignature(verifier);
-        assertNotNull(tokenJwt);
-
-        Jwt idToken = JwtHelper.decode(((CompositeAccessToken) accessToken).getIdTokenValue());
-        idToken.verifySignature(verifier);
-        return idToken;
+        return tokenSupport.getIdToken(scopes);
     }
 
     @Test
     public void testCreateAccessWithNonExistingScopes() {
         List<String> scopesThatDontExist = Arrays.asList("scope1","scope2");
         AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, scopesThatDontExist);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, IMPLICIT);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is(ISSUER_URI)));
         assertThat(accessToken, scope(is(scopesThatDontExist)));
         assertThat(accessToken, validFor(is(60 * 60 * 12)));
         assertThat(accessToken.getRefreshToken(), is(nullValue()));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(scopesThatDontExist));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(scopesThatDontExist));
     }
 
     @Test
@@ -969,21 +1176,24 @@ public class UaaTokenServicesTests {
                 IdentityZoneConfiguration.class
             )
         );
+        tokenSupport.copyClients(IdentityZone.getUaa().getId(), identityZone.getId());
         IdentityZoneHolder.set(identityZone);
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+
+
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(accessToken);
+        this.assertCommonUserAccessTokenProperties(accessToken, CLIENT_ID);
         assertThat(accessToken, issuerUri(is("http://test-zone-subdomain.localhost:8080/uaa/oauth/token")));
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken, validFor(is(3600)));
         assertThat(accessToken.getRefreshToken(), is(not(nullValue())));
 
@@ -992,7 +1202,7 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is("http://test-zone-subdomain.localhost:8080/uaa/oauth/token")));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(9600)));
 
-        this.assertCommonEventProperties(accessToken, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(accessToken, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
     }
 
     private String buildJsonString(List<String> list) {
@@ -1018,51 +1228,51 @@ public class UaaTokenServicesTests {
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
         // First Request
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         OAuth2RefreshToken refreshToken = accessToken.getRefreshToken();
         assertThat(refreshToken, is(not(nullValue())));
 
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.scope(is(requestedAuthScopes)));
-        assertThat(refreshToken, OAuth2RefreshTokenMatchers.audience(is(resourceIds)));
+        assertThat(refreshToken, OAuth2RefreshTokenMatchers.scope(is(tokenSupport.requestedAuthScopes)));
+        assertThat(refreshToken, OAuth2RefreshTokenMatchers.audience(is(tokenSupport.resourceIds)));
 
         // Second request with reduced scopes
-        AuthorizationRequest reducedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,readScope);
-        reducedScopeAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest reducedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.readScope);
+        reducedScopeAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(reducedScopeAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         reducedScopeAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
         OAuth2Authentication reducedScopeAuthentication = new OAuth2Authentication(reducedScopeAuthorizationRequest.createOAuth2Request(),userAuthentication);
-        OAuth2AccessToken reducedScopeAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(reducedScopeAuthorizationRequest,"refresh_token"));
+        OAuth2AccessToken reducedScopeAccessToken = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(reducedScopeAuthorizationRequest,"refresh_token"));
 
         // AT should have the new scopes, RT should be the same
-        assertThat(reducedScopeAccessToken, scope(is(readScope)));
+        assertThat(reducedScopeAccessToken, scope(is(tokenSupport.readScope)));
         assertEquals(reducedScopeAccessToken.getRefreshToken(), accessToken.getRefreshToken());
     }
 
@@ -1071,59 +1281,62 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
         // First Request
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        assertThat(accessToken, scope(is(requestedAuthScopes)));
+        assertThat(accessToken, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(accessToken.getRefreshToken(), is(not(nullValue())));
 
-        assertThat(accessToken.getRefreshToken(), OAuth2RefreshTokenMatchers.scope(is(requestedAuthScopes)));
-        assertThat(accessToken.getRefreshToken(), OAuth2RefreshTokenMatchers.audience(is(resourceIds)));
+        assertThat(accessToken.getRefreshToken(), OAuth2RefreshTokenMatchers.scope(is(tokenSupport.requestedAuthScopes)));
+        assertThat(accessToken.getRefreshToken(), OAuth2RefreshTokenMatchers.audience(is(tokenSupport.resourceIds)));
 
         // Second request with expanded scopes
-        AuthorizationRequest expandedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,expandedScopes);
-        expandedScopeAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest expandedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.expandedScopes);
+        expandedScopeAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(expandedScopeAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         expandedScopeAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
         OAuth2Authentication expandedScopeAuthentication = new OAuth2Authentication(expandedScopeAuthorizationRequest.createOAuth2Request(),userAuthentication);
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(expandedScopeAuthorizationRequest, "refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(expandedScopeAuthorizationRequest, "refresh_token"));
     }
 
     @Test
     public void testChangedExpiryForTokens() {
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
         clientDetails.setAccessTokenValiditySeconds(3600);
         clientDetails.setRefreshTokenValiditySeconds(36000);
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
@@ -1139,44 +1352,44 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        UaaUser user = userDatabase.retrieveUserByName(username, OriginKeys.UAA);
+        UaaUser user = tokenSupport.userDatabase.retrieveUserByName(tokenSupport.username, OriginKeys.UAA);
         UaaUser newUser = new UaaUser(new UaaUserPrototype()
-            .withId(userId)
+            .withId(tokenSupport.userId)
             .withUsername(user.getUsername())
             .withPassword("blah")
             .withEmail(user.getEmail())
             .withAuthorities(user.getAuthorities()));
-        userDatabase.updateUser(userId, newUser);
+        tokenSupport.userDatabase.updateUser(tokenSupport.userId, newUser);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -1184,52 +1397,55 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
 
-        BaseClientDetails clientDetails = cloneClient(defaultClient);
+        BaseClientDetails clientDetails = cloneClient(tokenSupport.defaultClient);
         // Back date the refresh token. Crude way to do this but i'm not sure of
         // another
         clientDetails.setRefreshTokenValiditySeconds(-36000);
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, clientDetails));
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, clientDetails)
+        );
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
     public void testRefreshTokenAfterApprovalsRevoked() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
@@ -1237,26 +1453,26 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
 
         // Other scope is left unapproved
 
-        for(Approval approval : approvalStore.getApprovals(userId, CLIENT_ID)) {
-            approvalStore.revokeApproval(approval);
+        for(Approval approval : tokenSupport.approvalStore.getApprovals(tokenSupport.userId, CLIENT_ID, IdentityZoneHolder.get().getId())) {
+            tokenSupport.approvalStore.revokeApproval(approval, IdentityZoneHolder.get().getId());
         }
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -1264,36 +1480,36 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, -3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -1301,36 +1517,36 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, -3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.DENIED));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setStatus(ApprovalStatus.DENIED), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.APPROVED));
+            .setStatus(ApprovalStatus.APPROVED), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
@@ -1338,167 +1554,274 @@ public class UaaTokenServicesTests {
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, -3000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
-            .setStatus(ApprovalStatus.DENIED));
+            .setStatus(ApprovalStatus.DENIED), IdentityZoneHolder.get().getId());
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest,"refresh_token"));
     }
 
     @Test(expected = InvalidTokenException.class)
     public void testRefreshTokenAfterApprovalsMissing2() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        refreshAuthorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest refreshAuthorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        refreshAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> refreshAzParameters = new HashMap<>(refreshAuthorizationRequest.getRequestParameters());
         refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
         refreshAuthorizationRequest.setRequestParameters(refreshAzParameters);
 
-        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token"));
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(refreshAuthorizationRequest, "refresh_token"));
+    }
+
+    @Test
+    public void refreshAccessTokenWithGrantTypeRestricted() {
+        expectedEx.expect(InsufficientScopeException.class);
+        expectedEx.expectMessage("Expected scope "+ UAA_REFRESH_TOKEN+" is missing");
+
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
+        authorizationRequest.setRequestParameters(azParameters);
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), tokenSupport.defaultUserAuthentication);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+
+        AuthorizationRequest reducedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.readScope);
+        reducedScopeAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> refreshAzParameters = new HashMap<>(reducedScopeAuthorizationRequest.getRequestParameters());
+        refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
+        reducedScopeAuthorizationRequest.setRequestParameters(refreshAzParameters);
+
+        tokenServices.setRestrictRefreshGrant(true);
+        tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(reducedScopeAuthorizationRequest, "refresh_token"));
+    }
+
+    @Test
+    public void refreshAccessTokenWithGrantTypeRestricted_butRefreshScopePresent() {
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, Arrays.asList(UAA_REFRESH_TOKEN));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
+        authorizationRequest.setRequestParameters(azParameters);
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), tokenSupport.defaultUserAuthentication);
+        tokenServices.setRestrictRefreshGrant(true);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+
+        AuthorizationRequest reducedScopeAuthorizationRequest = new AuthorizationRequest(CLIENT_ID, null);
+        reducedScopeAuthorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> refreshAzParameters = new HashMap<>(reducedScopeAuthorizationRequest.getRequestParameters());
+        refreshAzParameters.put(GRANT_TYPE, REFRESH_TOKEN);
+        reducedScopeAuthorizationRequest.setRequestParameters(refreshAzParameters);
+
+        expiresAt.add(Calendar.MILLISECOND, 300000);
+        updatedAt.add(Calendar.MILLISECOND, -1000);
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
+            .setClientId(CLIENT_ID)
+            .setScope(UAA_REFRESH_TOKEN)
+            .setExpiresAt(expiresAt.getTime())
+            .setStatus(ApprovalStatus.APPROVED)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+
+        tokenServices.setRestrictRefreshGrant(true);
+        OAuth2AccessToken refresh_token = tokenServices.refreshAccessToken(accessToken.getRefreshToken().getValue(), tokenSupport.requestFactory.createTokenRequest(reducedScopeAuthorizationRequest, "refresh_token"));
+        assertNotNull(refresh_token);
     }
 
     @Test
     public void testReadAccessToken() {
-        AuthorizationRequest authorizationRequest =new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        readAccessToken(EMPTY_SET);
+    }
+
+    @Test
+    public void testReadAccessToken_No_PII() {
+        readAccessToken(new HashSet<>(Arrays.asList(ClaimConstants.EMAIL, ClaimConstants.USER_NAME)));
+    }
+
+    public void readAccessToken(Set<String> excludedClaims) {
+        tokenServices.setExcludedClaims(excludedClaims);
+        AuthorizationRequest authorizationRequest =new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(
-            new Approval()
-                .setUserId(userId)
-                .setClientId(CLIENT_ID)
-                .setScope(OPENID)
-                .setExpiresAt(expiresAt.getTime())
-                .setStatus(ApprovalStatus.APPROVED)
-                .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        Approval approval = new Approval()
+            .setUserId(tokenSupport.userId)
+            .setClientId(CLIENT_ID)
+            .setScope(OPENID)
+            .setExpiresAt(expiresAt.getTime())
+            .setStatus(ApprovalStatus.APPROVED)
+            .setLastUpdatedAt(updatedAt.getTime());
+        tokenSupport.approvalStore.addApproval(
+            approval, IdentityZoneHolder.get().getId());
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
         assertEquals(accessToken, tokenServices.readAccessToken(accessToken.getValue()));
+
+        tokenSupport.approvalStore.revokeApproval(approval, IdentityZoneHolder.get().getId());
+        try {
+            tokenServices.readAccessToken(accessToken.getValue());
+            fail("Approval has been revoked");
+        } catch (InvalidTokenException x) {
+            assertThat("Exception should be about approvals", x.getMessage().contains("some requested scopes are not approved"));
+        }
     }
 
     @Test(expected = InvalidTokenException.class)
     public void testReadAccessTokenForDeletedUserId() {
-        AuthorizationRequest authorizationRequest =new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest =new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         Calendar expiresAt = Calendar.getInstance();
         expiresAt.add(Calendar.MILLISECOND, 3000);
         Calendar updatedAt = Calendar.getInstance();
         updatedAt.add(Calendar.MILLISECOND, -1000);
 
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(readScope.get(0))
+            .setScope(tokenSupport.readScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
-        approvalStore.addApproval(new Approval()
-            .setUserId(userId)
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
+        tokenSupport.approvalStore.addApproval(new Approval()
+            .setUserId(tokenSupport.userId)
             .setClientId(CLIENT_ID)
-            .setScope(writeScope.get(0))
+            .setScope(tokenSupport.writeScope.get(0))
             .setExpiresAt(expiresAt.getTime())
             .setStatus(ApprovalStatus.APPROVED)
-            .setLastUpdatedAt(updatedAt.getTime()));
+            .setLastUpdatedAt(updatedAt.getTime()), IdentityZoneHolder.get().getId());
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
 
-        this.userDatabase.clear();
+        this.tokenSupport.userDatabase.clear();
         assertEquals(accessToken, tokenServices.readAccessToken(accessToken.getValue()));
     }
 
     @Test
     public void testLoadAuthenticationForAUser() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
         OAuth2Authentication loadedAuthentication = tokenServices.loadAuthentication(accessToken.getValue());
 
         assertEquals(USER_AUTHORITIES, loadedAuthentication.getAuthorities());
-        assertEquals(username, loadedAuthentication.getName());
-        UaaPrincipal uaaPrincipal = (UaaPrincipal)defaultUserAuthentication.getPrincipal();
+        assertEquals(tokenSupport.username, loadedAuthentication.getName());
+        UaaPrincipal uaaPrincipal = (UaaPrincipal)tokenSupport.defaultUserAuthentication.getPrincipal();
         assertEquals(uaaPrincipal, loadedAuthentication.getPrincipal());
         assertNull(loadedAuthentication.getDetails());
 
         Authentication userAuth = loadedAuthentication.getUserAuthentication();
-        assertEquals(username, userAuth.getName());
+        assertEquals(tokenSupport.username, userAuth.getName());
         assertEquals(uaaPrincipal, userAuth.getPrincipal());
         assertTrue(userAuth.isAuthenticated());
     }
 
     @Test
-    public void testLoad_Opaque_AuthenticationForAUser() {
-        defaultClient.addAdditionalInformation(ClientConstants.AUTO_APPROVE, true);
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
+    public void validate_token_happy_path() throws Exception {
+        test_validateToken_method(ignore -> {});
+    }
+
+    @Test
+    public void validate_token_user_gone() throws Exception {
+        expectedEx.expect(InvalidTokenException.class);
+        expectedEx.expectMessage("Token bears a non-existent user ID: " + tokenSupport.userId);
+        test_validateToken_method(ignore -> tokenSupport.userDatabase.clear());
+    }
+
+    @Test
+    public void validate_token_client_gone() throws Exception {
+        expectedEx.expect(InvalidTokenException.class);
+        expectedEx.expectMessage("Invalid client ID "+tokenSupport.defaultClient.getClientId());
+        test_validateToken_method(ignore -> tokenSupport.clientDetailsService.setClientDetailsStore(IdentityZoneHolder.get().getId(), emptyMap()));
+    }
+
+    @Test
+    public void opaque_tokens_validate_signature() throws Exception {
+        expectedEx.expect(InvalidTokenException.class);
+        expectedEx.expectMessage("Invalid key ID: testKey");
+
+        Consumer<Void> setup = (ignore) -> {
+            Map < String, String > keys = new HashMap<>();
+            keys.put("otherKey", "unc0uf98gv89egh4v98749978hv");
+            tokenSupport.tokenPolicy.setKeys(keys);
+            tokenSupport.tokenPolicy.setActiveKeyId("otherKey");
+            IdentityZoneHolder.get().getConfig().setTokenPolicy(tokenSupport.tokenPolicy);
+        };
+
+        test_validateToken_method(setup);
+    }
+    public void test_validateToken_method(Consumer<Void> setup) throws Exception {
+        tokenSupport.defaultClient.setAutoApproveScopes(singleton("true"));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
         authorizationRequest.setResponseTypes(new HashSet(Arrays.asList(CompositeAccessToken.ID_TOKEN, "token")));
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
-        azParameters.put(TokenConstants.REQUEST_TOKEN_FORMAT, TokenConstants.OPAQUE);
+        azParameters.put(REQUEST_TOKEN_FORMAT, TokenConstants.OPAQUE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
@@ -1509,11 +1832,36 @@ public class UaaTokenServicesTests {
         assertThat("Opaque access token must be shorter than 37 characters", accessToken.getValue().length(), lessThanOrEqualTo(36));
         assertThat("Opaque refresh token must be shorter than 37 characters", accessToken.getRefreshToken().getValue().length(), lessThanOrEqualTo(36));
 
-        String accessTokenValue = tokenProvisioning.retrieve(composite.getValue()).getValue();
+        setup.accept(null);
+        tokenServices.validateToken(accessToken.getValue());
+    }
+
+    @Test
+    public void testLoad_Opaque_AuthenticationForAUser() {
+        tokenSupport.defaultClient.setAutoApproveScopes(singleton("true"));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResponseTypes(new HashSet(Arrays.asList(CompositeAccessToken.ID_TOKEN, "token")));
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
+        Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
+        azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
+        azParameters.put(REQUEST_TOKEN_FORMAT, TokenConstants.OPAQUE);
+        authorizationRequest.setRequestParameters(azParameters);
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
+
+        OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
+        OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
+        assertNotNull(accessToken);
+        assertTrue("Token should be composite token", accessToken instanceof CompositeAccessToken);
+        CompositeAccessToken composite = (CompositeAccessToken)accessToken;
+        assertThat("id_token should be JWT, thus longer than 36 characters", composite.getIdTokenValue().length(), greaterThan(36));
+        assertThat("Opaque access token must be shorter than 37 characters", accessToken.getValue().length(), lessThanOrEqualTo(36));
+        assertThat("Opaque refresh token must be shorter than 37 characters", accessToken.getRefreshToken().getValue().length(), lessThanOrEqualTo(36));
+
+        String accessTokenValue = tokenProvisioning.retrieve(composite.getValue(), IdentityZoneHolder.get().getId()).getValue();
         Map<String,Object> accessTokenClaims = tokenServices.validateToken(accessTokenValue).getClaims();
         assertEquals(true, accessTokenClaims.get(ClaimConstants.REVOCABLE));
 
-        String refreshTokenValue = tokenProvisioning.retrieve(composite.getRefreshToken().getValue()).getValue();
+        String refreshTokenValue = tokenProvisioning.retrieve(composite.getRefreshToken().getValue(), IdentityZoneHolder.get().getId()).getValue();
         Map<String,Object> refreshTokenClaims = tokenServices.validateToken(refreshTokenValue).getClaims();
         assertEquals(true, refreshTokenClaims.get(ClaimConstants.REVOCABLE));
 
@@ -1521,13 +1869,13 @@ public class UaaTokenServicesTests {
         OAuth2Authentication loadedAuthentication = tokenServices.loadAuthentication(accessToken.getValue());
 
         assertEquals(USER_AUTHORITIES, loadedAuthentication.getAuthorities());
-        assertEquals(username, loadedAuthentication.getName());
-        UaaPrincipal uaaPrincipal = (UaaPrincipal)defaultUserAuthentication.getPrincipal();
+        assertEquals(tokenSupport.username, loadedAuthentication.getName());
+        UaaPrincipal uaaPrincipal = (UaaPrincipal)tokenSupport.defaultUserAuthentication.getPrincipal();
         assertEquals(uaaPrincipal, loadedAuthentication.getPrincipal());
         assertNull(loadedAuthentication.getDetails());
 
         Authentication userAuth = loadedAuthentication.getUserAuthentication();
-        assertEquals(username, userAuth.getName());
+        assertEquals(tokenSupport.username, userAuth.getName());
         assertEquals(uaaPrincipal, userAuth.getPrincipal());
         assertTrue(userAuth.isAuthenticated());
 
@@ -1541,8 +1889,8 @@ public class UaaTokenServicesTests {
 
     @Test
     public void testLoadAuthenticationForAClient() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID, tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, CLIENT_CREDENTIALS);
         authorizationRequest.setRequestParameters(azParameters);
@@ -1565,16 +1913,19 @@ public class UaaTokenServicesTests {
 
     @Test(expected = InvalidTokenException.class)
     public void testLoadAuthenticationWithAnExpiredToken() throws InterruptedException {
-        BaseClientDetails shortExpiryClient = defaultClient;
+        BaseClientDetails shortExpiryClient = tokenSupport.defaultClient;
         shortExpiryClient.setAccessTokenValiditySeconds(1);
-        clientDetailsService.setClientDetailsStore(Collections.singletonMap(CLIENT_ID, shortExpiryClient));
+        tokenSupport.clientDetailsService.setClientDetailsStore(
+            IdentityZoneHolder.get().getId(),
+            Collections.singletonMap(CLIENT_ID, shortExpiryClient)
+        );
 
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken accessToken = tokenServices.createAccessToken(authentication);
@@ -1586,20 +1937,20 @@ public class UaaTokenServicesTests {
 
     @Test
     public void testCreateAccessTokenAuthcodeGrantAdditionalAuthorizationAttributes() {
-        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,requestedAuthScopes);
-        authorizationRequest.setResourceIds(new HashSet<>(resourceIds));
+        AuthorizationRequest authorizationRequest = new AuthorizationRequest(CLIENT_ID,tokenSupport.requestedAuthScopes);
+        authorizationRequest.setResourceIds(new HashSet<>(tokenSupport.resourceIds));
         Map<String, String> azParameters = new HashMap<>(authorizationRequest.getRequestParameters());
         azParameters.put(GRANT_TYPE, AUTHORIZATION_CODE);
         azParameters.put("authorities","{\"az_attr\":{\"external_group\":\"domain\\\\group1\", \"external_id\":\"abcd1234\"}}");
         authorizationRequest.setRequestParameters(azParameters);
-        Authentication userAuthentication = defaultUserAuthentication;
+        Authentication userAuthentication = tokenSupport.defaultUserAuthentication;
 
         OAuth2Authentication authentication = new OAuth2Authentication(authorizationRequest.createOAuth2Request(), userAuthentication);
         OAuth2AccessToken token = tokenServices.createAccessToken(authentication);
 
-        this.assertCommonUserAccessTokenProperties(token);
+        this.assertCommonUserAccessTokenProperties(token, CLIENT_ID);
         assertThat(token, issuerUri(is(ISSUER_URI)));
-        assertThat(token, scope(is(requestedAuthScopes)));
+        assertThat(token, scope(is(tokenSupport.requestedAuthScopes)));
         assertThat(token, validFor(is(60 * 60 * 12)));
 
         OAuth2RefreshToken refreshToken = token.getRefreshToken();
@@ -1607,7 +1958,7 @@ public class UaaTokenServicesTests {
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.issuerUri(is(ISSUER_URI)));
         assertThat(refreshToken, OAuth2RefreshTokenMatchers.validFor(is(60 * 60 * 24 * 30)));
 
-        this.assertCommonEventProperties(token, userId, buildJsonString(requestedAuthScopes));
+        this.assertCommonEventProperties(token, tokenSupport.userId, buildJsonString(tokenSupport.requestedAuthScopes));
 
         Map<String, String> azMap = new LinkedHashMap<>();
         azMap.put("external_group", "domain\\group1");
@@ -1615,7 +1966,7 @@ public class UaaTokenServicesTests {
         assertEquals(azMap, token.getAdditionalInformation().get("az_attr"));
     }
 
-    private BaseClientDetails cloneClient(BaseClientDetails client) {
+    private BaseClientDetails cloneClient(ClientDetails client) {
         return new BaseClientDetails(client);
     }
 
@@ -1626,24 +1977,24 @@ public class UaaTokenServicesTests {
                                       subject(is(CLIENT_ID)),
                                       username(is(nullValue())),
                                       cid(is(CLIENT_ID)),
-                                      scope(is(clientScopes)),
-                                      audience(is(resourceIds)),
+                                      scope(is(tokenSupport.clientScopes)),
+                                      audience(is(tokenSupport.resourceIds)),
                                       jwtId(not(isEmptyString())),
                                       issuedAt(is(greaterThan(0))),
                                       expiry(is(greaterThan(0)))));
     }
 
     @SuppressWarnings({ "unused", "unchecked" })
-    private void assertCommonUserAccessTokenProperties(OAuth2AccessToken accessToken) {
-        assertThat(accessToken, allOf(username(is(username)),
-                                      clientId(is(CLIENT_ID)),
-                                      subject(is(userId)),
-                                      audience(is(resourceIds)),
+    private void assertCommonUserAccessTokenProperties(OAuth2AccessToken accessToken, String clientId) {
+        assertThat(accessToken, allOf(username(is(tokenSupport.username)),
+                                      clientId(is(clientId)),
+                                      subject(is(tokenSupport.userId)),
+                                      audience(is(tokenSupport.resourceIds)),
                                       origin(is(OriginKeys.UAA)),
                                       revocationSignature(is(not(nullValue()))),
-                                      cid(is(CLIENT_ID)),
-                                      userId(is(userId)),
-                                      email(is(email)),
+                                      cid(is(clientId)),
+                                      userId(is(tokenSupport.userId)),
+                                      email(is(tokenSupport.email)),
                                       jwtId(not(isEmptyString())),
                                       issuedAt(is(greaterThan(0))),
                                       expiry(is(greaterThan(0)))
@@ -1653,10 +2004,10 @@ public class UaaTokenServicesTests {
     @SuppressWarnings("unchecked")
     private void assertCommonUserRefreshTokenProperties(OAuth2RefreshToken refreshToken) {
         assertThat(refreshToken, allOf(/*issuer(is(issuerUri)),*/
-                                        OAuth2RefreshTokenMatchers.username(is(username)),
+                                        OAuth2RefreshTokenMatchers.username(is(tokenSupport.username)),
                                         OAuth2RefreshTokenMatchers.clientId(is(CLIENT_ID)),
                                         OAuth2RefreshTokenMatchers.subject(is(not(nullValue()))),
-                                        OAuth2RefreshTokenMatchers.audience(is(resourceIds)),
+                                        OAuth2RefreshTokenMatchers.audience(is(tokenSupport.resourceIds)),
                                         OAuth2RefreshTokenMatchers.origin(is(OriginKeys.UAA)),
                                         OAuth2RefreshTokenMatchers.revocationSignature(is(not(nullValue()))),
                                         OAuth2RefreshTokenMatchers.jwtId(not(isEmptyString())),
@@ -1667,11 +2018,11 @@ public class UaaTokenServicesTests {
     }
 
     private void assertCommonEventProperties(OAuth2AccessToken accessToken, String expectedPrincipalId, String expectedData) {
-        Assert.assertEquals(1, publisher.getEventCount());
+        Assert.assertEquals(1, tokenSupport.publisher.getEventCount());
 
-        TokenIssuedEvent event = publisher.getLatestEvent();
+        TokenIssuedEvent event = tokenSupport.publisher.getLatestEvent();
         Assert.assertEquals(accessToken, event.getSource());
-        Assert.assertEquals(mockAuthentication, event.getAuthentication());
+        Assert.assertEquals(tokenSupport.mockAuthentication, event.getAuthentication());
         AuditEvent auditEvent = event.getAuditEvent();
         Assert.assertEquals(expectedPrincipalId, auditEvent.getPrincipalId());
         Assert.assertEquals(expectedData, auditEvent.getData());

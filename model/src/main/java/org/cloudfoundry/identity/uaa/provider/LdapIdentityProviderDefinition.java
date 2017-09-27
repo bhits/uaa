@@ -13,6 +13,9 @@
 package org.cloudfoundry.identity.uaa.provider;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import org.cloudfoundry.identity.uaa.constants.OriginKeys;
 import org.springframework.core.env.AbstractEnvironment;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.util.StringUtils;
@@ -23,8 +26,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefinition {
-    public static final String LDAP = "ldap";
+    public static final String LDAP_TLS_NONE = "none";
+    public static final String LDAP_TLS_SIMPLE = "simple";
+    public static final String LDAP_TLS_EXTERNAL = "external";
+
+    public static final String LDAP = OriginKeys.LDAP;
     public static final String LDAP_PREFIX = LDAP + ".";
     public static final String LDAP_ATTRIBUTE_MAPPINGS = LDAP_PREFIX + ATTRIBUTE_MAPPINGS;
     public static final String LDAP_BASE_LOCAL_PASSWORD_COMPARE = LDAP_PREFIX + "base.localPasswordCompare";
@@ -42,6 +50,7 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     public static final String LDAP_BASE_USER_DN_PATTERN = LDAP_PREFIX + "base.userDnPattern";
     public static final String LDAP_BASE_USER_DN_PATTERN_DELIMITER = LDAP_PREFIX + "base.userDnPatternDelimiter";
     public static final String LDAP_EMAIL_DOMAIN = LDAP_PREFIX + EMAIL_DOMAIN_ATTR;
+    public static final String LDAP_STORE_CUSTOM_ATTRIBUTES = LDAP_PREFIX + STORE_CUSTOM_ATTRIBUTES_NAME;
     public static final String LDAP_EXTERNAL_GROUPS_WHITELIST = LDAP_PREFIX + "externalGroupsWhitelist";
     public static final String LDAP_GROUP_FILE_GROUPS_AS_SCOPES = "ldap/ldap-groups-as-scopes.xml";
     public static final String LDAP_GROUP_FILE_GROUPS_MAP_TO_SCOPES = "ldap/ldap-groups-map-to-scopes.xml";
@@ -59,7 +68,28 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     public static final String LDAP_PROFILE_FILE_SEARCH_AND_COMPARE = "ldap/ldap-search-and-compare.xml";
     public static final String LDAP_PROFILE_FILE_SIMPLE_BIND = "ldap/ldap-simple-bind.xml";
     public static final String LDAP_SSL_SKIPVERIFICATION = LDAP_PREFIX + "ssl.skipverification";
+    public static final String LDAP_SSL_TLS = LDAP_PREFIX + "ssl.tls";
     public static final String MAIL = "mail";
+
+    public static final List<String> VALID_PROFILE_FILES =
+        Collections.unmodifiableList(
+            Arrays.asList(
+                "ldap/ldap-search-and-bind.xml",
+                "ldap/ldap-search-and-compare.xml",
+                "ldap/ldap-simple-bind.xml"
+            )
+        );
+
+    public static final List<String> VALID_GROUP_FILES =
+        Collections.unmodifiableList(
+            Arrays.asList(
+                "ldap/ldap-groups-as-scopes.xml",
+                "ldap/ldap-groups-map-to-scopes.xml",
+                "ldap/ldap-groups-null.xml",
+                "ldap/ldap-groups-populator.xml"
+            )
+        );
+
 
     public static final List<String> LDAP_PROPERTY_NAMES = Collections.unmodifiableList(
         Arrays.asList(
@@ -89,11 +119,13 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
             LDAP_GROUPS_SEARCH_BASE,
             LDAP_GROUPS_SEARCH_SUBTREE,
             LDAP_PROFILE_FILE,
-            LDAP_SSL_SKIPVERIFICATION
+            LDAP_SSL_SKIPVERIFICATION,
+            LDAP_SSL_TLS
         )
     );
 
-    public static final Map<String,Class<?>> LDAP_PROPERTY_TYPES = new HashMap<>();
+    public static final Map<String, Class<?>> LDAP_PROPERTY_TYPES = new HashMap<>();
+
     static {
         LDAP_PROPERTY_TYPES.put(LDAP_ATTRIBUTE_MAPPINGS, Map.class);
         LDAP_PROPERTY_TYPES.put(LDAP_BASE_LOCAL_PASSWORD_COMPARE, Boolean.class);
@@ -122,6 +154,7 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
         LDAP_PROPERTY_TYPES.put(LDAP_GROUPS_SEARCH_SUBTREE, Boolean.class);
         LDAP_PROPERTY_TYPES.put(LDAP_PROFILE_FILE, String.class);
         LDAP_PROPERTY_TYPES.put(LDAP_SSL_SKIPVERIFICATION, Boolean.class);
+        LDAP_PROPERTY_TYPES.put(LDAP_SSL_TLS, String.class);
     }
 
     private String ldapProfileFile;
@@ -153,6 +186,8 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     private int maxGroupSearchDepth = 10;
     private String groupRoleAttribute;
 
+    private String tlsConfiguration = LDAP_TLS_NONE;
+
     public static LdapIdentityProviderDefinition searchAndBindMapGroupToScopes(
         String baseUrl,
         String bindUserDn,
@@ -179,8 +214,8 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
         definition.groupSearchFilter = groupSearchFilter;
         definition.mailAttributeName = mailAttributeName;
         definition.mailSubstitute = mailSubstitute;
-        definition.ldapProfileFile=LDAP_PROFILE_FILE_SEARCH_AND_BIND;
-        definition.ldapGroupFile= LDAP_GROUP_FILE_GROUPS_MAP_TO_SCOPES;
+        definition.ldapProfileFile = LDAP_PROFILE_FILE_SEARCH_AND_BIND;
+        definition.ldapGroupFile = LDAP_GROUP_FILE_GROUPS_MAP_TO_SCOPES;
         definition.mailSubstituteOverridesLdap = mailSubstituteOverridesLdap;
         definition.autoAddGroups = autoAddGroups;
         definition.groupSearchSubTree = groupSearchSubTree;
@@ -205,6 +240,7 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
         return baseUrl;
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public String getBindPassword() {
         return bindPassword;
     }
@@ -238,7 +274,7 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     }
 
     public Boolean isMailSubstituteOverridesLdap() {
-        return mailSubstituteOverridesLdap==null ? false : mailSubstituteOverridesLdap;
+        return mailSubstituteOverridesLdap == null ? false : mailSubstituteOverridesLdap;
     }
 
     public String getUserSearchBase() {
@@ -258,7 +294,7 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     }
 
     public Boolean isSkipSSLVerification() {
-        return skipSSLVerification==null?false:skipSSLVerification;
+        return skipSSLVerification == null ? false : skipSSLVerification;
     }
 
     public void setAutoAddGroups(Boolean autoAddGroups) {
@@ -290,10 +326,16 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     }
 
     public void setLdapGroupFile(String ldapGroupFile) {
+        if (ldapGroupFile != null && !VALID_GROUP_FILES.contains(ldapGroupFile)) {
+            throw new IllegalArgumentException("Invalid profile file:" + ldapGroupFile);
+        }
         this.ldapGroupFile = ldapGroupFile;
     }
 
     public void setLdapProfileFile(String ldapProfileFile) {
+        if (ldapProfileFile != null && !VALID_PROFILE_FILES.contains(ldapProfileFile)) {
+            throw new IllegalArgumentException("Invalid profile file:" + ldapProfileFile);
+        }
         this.ldapProfileFile = ldapProfileFile;
     }
 
@@ -346,7 +388,11 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
     }
 
     public void setPasswordEncoder(String passwordEncoder) {
-        this.passwordEncoder = passwordEncoder;
+        if (passwordEncoder == null || "org.cloudfoundry.identity.uaa.provider.ldap.DynamicPasswordComparator".equals(passwordEncoder)) {
+            this.passwordEncoder = passwordEncoder;
+        } else {
+            throw new IllegalArgumentException("Unknown encoder:" + passwordEncoder);
+        }
     }
 
     public String getGroupRoleAttribute() {
@@ -384,6 +430,26 @@ public class LdapIdentityProviderDefinition extends ExternalIdentityProviderDefi
 
     public void setGroupsIgnorePartialResults(Boolean groupsIgnorePartialResults) {
         this.groupsIgnorePartialResults = groupsIgnorePartialResults;
+    }
+
+    public String getTlsConfiguration() {
+        return tlsConfiguration;
+    }
+
+    public void setTlsConfiguration(String tlsConfiguration) {
+        if (tlsConfiguration == null) {
+            tlsConfiguration = LDAP_TLS_NONE;
+        }
+        switch (tlsConfiguration) {
+            case LDAP_TLS_NONE:
+            case LDAP_TLS_SIMPLE:
+            case LDAP_TLS_EXTERNAL:
+                this.tlsConfiguration = tlsConfiguration;
+                break;
+            default:
+                throw new IllegalArgumentException(tlsConfiguration);
+        }
+
     }
 
     @Override

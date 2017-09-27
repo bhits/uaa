@@ -116,7 +116,6 @@ public abstract class AbstractClientParametersAuthenticationFilter implements Fi
     }
 
     private Authentication performClientAuthentication(HttpServletRequest req, Map<String, String> loginInfo, String clientId) {
-
         String clientSecret = loginInfo.get(CLIENT_SECRET);
         UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(clientId, clientSecret);
         authentication.setDetails(new UaaAuthenticationDetails(req, clientId));

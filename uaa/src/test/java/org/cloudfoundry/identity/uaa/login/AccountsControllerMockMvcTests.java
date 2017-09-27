@@ -1,6 +1,8 @@
 package org.cloudfoundry.identity.uaa.login;
 
 import com.dumbster.smtp.SimpleSmtpServer;
+import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
+import org.cloudfoundry.identity.uaa.zone.MultitenancyFixture;
 import com.dumbster.smtp.SmtpMessage;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.cloudfoundry.identity.uaa.account.EmailAccountCreationService;
@@ -14,7 +16,6 @@ import org.cloudfoundry.identity.uaa.mock.util.MockMvcUtils;
 import org.cloudfoundry.identity.uaa.mock.util.MockMvcUtils.PredictableGenerator;
 import org.cloudfoundry.identity.uaa.scim.ScimUser;
 import org.cloudfoundry.identity.uaa.scim.jdbc.JdbcScimUserProvisioning;
-import org.cloudfoundry.identity.uaa.test.TestClient;
 import org.cloudfoundry.identity.uaa.test.UaaTestAccounts;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.cloudfoundry.identity.uaa.util.SetServerNameRequestPostProcessor;
@@ -94,13 +95,13 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
     }
 
     @After
-    public void restoreMailSender() {
+    public void restoreMailSender() throws Exception {
         ((MockEnvironment) getWebApplicationContext().getEnvironment()).setProperty("assetBaseUrl", "/resources/oss");
         getWebApplicationContext().getBean("emailService", EmailService.class).setMailSender(originalSender);
     }
 
     @After
-    public void resetGenerator() {
+    public void resetGenerator() throws Exception {
         getWebApplicationContext().getBean(JdbcExpiringCodeStore.class).setGenerator(new RandomValueStringGenerator(24));
     }
 
@@ -166,7 +167,40 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
     }
 
     @Test
-    public void testImage() throws Exception {
+    public void testCreateAccountWithdisableSelfService() throws Exception {
+        String subdomain = generator.generate();
+        IdentityZone zone = MultitenancyFixture.identityZone(subdomain, subdomain);
+        zone.getConfig().getLinks().getSelfService().setSelfServiceLinksEnabled(false);
+
+        MockMvcUtils.createOtherIdentityZoneAndReturnResult(getMockMvc(), getWebApplicationContext(), getBaseClientDetails() ,zone);
+
+        getMockMvc().perform(get("/create_account")
+                .with(new SetServerNameRequestPostProcessor(subdomain + ".localhost")))
+                .andExpect(model().attribute("error_message_code", "self_service_disabled"))
+                .andExpect(view().name("error"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    public void testDisableSelfServiceCreateAccountPost() throws Exception {
+        String subdomain = generator.generate();
+        IdentityZone zone = MultitenancyFixture.identityZone(subdomain, subdomain);
+        zone.getConfig().getLinks().getSelfService().setSelfServiceLinksEnabled(false);
+
+        MockMvcUtils.createOtherIdentityZoneAndReturnResult(getMockMvc(), getWebApplicationContext(), getBaseClientDetails() ,zone);
+
+        getMockMvc().perform(post("/create_account.do")
+                .with(new SetServerNameRequestPostProcessor(subdomain + ".localhost"))
+                .param("email", userEmail)
+                .param("password", "secr3T")
+                .param("password_confirmation", "secr3T"))
+                .andExpect(model().attribute("error_message_code", "self_service_disabled"))
+                .andExpect(view().name("error"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    public void defaultZoneLogoNull_useAssetBaseUrlImage() throws Exception {
         ((MockEnvironment) getWebApplicationContext().getEnvironment()).setProperty("assetBaseUrl", "/resources/oss");
 
         getMockMvc().perform(get("/create_account"))
@@ -174,15 +208,15 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
     }
 
     @Test
-    public void testBrandingImageWithinZone() throws Exception {
+    public void zoneLogoNull_doNotDisplayImage() throws Exception {
         String subdomain = generator.generate();
         mockMvcUtils.createOtherIdentityZone(subdomain, getMockMvc(), getWebApplicationContext());
 
-        ((MockEnvironment) getWebApplicationContext().getEnvironment()).setProperty("assetBaseUrl", "/resources/pivotal");
+        ((MockEnvironment) getWebApplicationContext().getEnvironment()).setProperty("assetBaseUrl", "/resources/oss");
 
         getMockMvc().perform(get("/create_account")
             .with(new SetServerNameRequestPostProcessor(subdomain + ".localhost")))
-            .andExpect(content().string(not(containsString("background-image:"))));
+            .andExpect(content().string(not(containsString("background-image: url(/resources/oss/images/product-logo.png);"))));
     }
 
     @Test
@@ -199,7 +233,7 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
                 .andExpect(redirectedUrl("accounts/email_sent"));
 
         JdbcScimUserProvisioning scimUserProvisioning = getWebApplicationContext().getBean(JdbcScimUserProvisioning.class);
-        ScimUser scimUser = scimUserProvisioning.query("userName eq '" + userEmail + "' and origin eq '" + OriginKeys.UAA + "'").get(0);
+        ScimUser scimUser = scimUserProvisioning.query("userName eq '" + userEmail + "' and origin eq '" + OriginKeys.UAA + "'", IdentityZoneHolder.get().getId()).get(0);
         assertFalse(scimUser.isVerified());
 
         MvcResult mvcResult = getMockMvc().perform(get("/verify_user")
@@ -246,12 +280,12 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
 
     @Test
     public void testCreatingAnAccountWithClientRedirect() throws Exception {
-        createAccount("http://client.redirect.uri", "http://client.redirect.uri");
+        createAccount("http://redirect.uri/client", "http://redirect.uri/client");
     }
 
     @Test
     public void testCreatingAnAccountWithFallbackClientRedirect() throws Exception {
-        createAccount("http://fallback.redirect.uri", null);
+        createAccount("http://redirect.uri/fallback", null);
     }
 
     @Test
@@ -350,15 +384,7 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
         identityZone.setName(subdomain);
         identityZone.setId(new RandomValueStringGenerator().generate());
 
-
-        BaseClientDetails clientDetails = new BaseClientDetails();
-        clientDetails.setClientId("myzoneclient");
-        clientDetails.setClientSecret("myzoneclientsecret");
-        clientDetails.setAuthorizedGrantTypes(Arrays.asList("client_credentials"));
-        clientDetails.setRegisteredRedirectUri(Collections.singleton("http://*.example.com"));
-
-        mockMvcUtils.createOtherIdentityZone(subdomain, getMockMvc(), getWebApplicationContext(), clientDetails);
-
+        mockMvcUtils.createOtherIdentityZone(subdomain, getMockMvc(), getWebApplicationContext(), getBaseClientDetails());
 
         getMockMvc().perform(post("/create_account.do")
             .with(new SetServerNameRequestPostProcessor(subdomain + ".localhost"))
@@ -389,6 +415,15 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
         UaaPrincipal principal = (UaaPrincipal) authentication.getPrincipal();
         assertThat(principal.getEmail(), equalTo(userEmail));
         assertThat(principal.getOrigin(), equalTo(OriginKeys.UAA));
+    }
+
+    private BaseClientDetails getBaseClientDetails() {
+        BaseClientDetails clientDetails = new BaseClientDetails();
+        clientDetails.setClientId("myzoneclient");
+        clientDetails.setClientSecret("myzoneclientsecret");
+        clientDetails.setAuthorizedGrantTypes(Arrays.asList("client_credentials"));
+        clientDetails.setRegisteredRedirectUri(Collections.singleton("http://myzoneclient.example.com"));
+        return clientDetails;
     }
 
     @Test
@@ -442,10 +477,9 @@ public class AccountsControllerMockMvcTests extends InjectedMockContextTest {
         clientDetails.setClientId("test-client-" + RandomStringUtils.randomAlphanumeric(2));
         clientDetails.setClientSecret("test-client-secret");
         clientDetails.setAuthorizedGrantTypes(Arrays.asList("client_credentials"));
-        clientDetails.setRegisteredRedirectUri(Collections.singleton("http://client.*.uri"));
-        clientDetails.addAdditionalInformation(EmailAccountCreationService.SIGNUP_REDIRECT_URL, "http://fallback.redirect.uri");
+        clientDetails.setRegisteredRedirectUri(Collections.singleton("http://redirect.uri/*"));
+        clientDetails.addAdditionalInformation(EmailAccountCreationService.SIGNUP_REDIRECT_URL, "http://redirect.uri/fallback");
 
-        TestClient testClient = new TestClient(getMockMvc());
         UaaTestAccounts testAccounts = UaaTestAccounts.standard(null);
         String adminToken = testClient.getClientCredentialsOAuthAccessToken(testAccounts.getAdminClientId(),
                 testAccounts.getAdminClientSecret(), "clients.admin");
